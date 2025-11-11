@@ -7,3 +7,6 @@
 *.dae
 data/*
 logs/*
+# vibe-heal configuration and scanner work files
+.env.vibeheal
+.scannerwork/
