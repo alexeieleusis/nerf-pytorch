@@ -27,6 +27,21 @@ rot_theta = lambda th : torch.Tensor([
 
 
 def pose_spherical(theta, phi, radius):
+    """
+    Generate a spherical camera pose for rendering novel views.
+
+    This creates a camera-to-world transformation matrix that positions
+    the camera on a sphere looking at the origin. Used for creating
+    smooth camera trajectories for video rendering.
+
+    Args:
+        theta: Azimuthal angle in degrees (rotation around vertical axis)
+        phi: Polar angle in degrees (elevation)
+        radius: Distance from origin
+
+    Returns:
+        c2w: [4, 4] camera-to-world transformation matrix
+    """
     c2w = trans_t(radius)
     c2w = rot_phi(phi/180.*np.pi) @ c2w
     c2w = rot_theta(theta/180.*np.pi) @ c2w
@@ -35,6 +50,27 @@ def pose_spherical(theta, phi, radius):
 
 
 def load_blender_data(basedir, half_res=False, testskip=1):
+    """
+    Load synthetic Blender dataset.
+
+    The Blender dataset consists of synthetic scenes with known camera poses
+    and perfect ground truth. Each scene includes:
+    - RGBA images (with alpha channel for compositing)
+    - Camera transformation matrices
+    - Camera intrinsics (field of view)
+
+    Args:
+        basedir: Path to dataset directory
+        half_res: If True, downsample images to 400x400
+        testskip: Load every Nth test/val image (for faster evaluation)
+
+    Returns:
+        imgs: [N, H, W, 4] RGBA images
+        poses: [N, 4, 4] camera-to-world transformation matrices
+        render_poses: Camera poses for novel view synthesis
+        hwf: [H, W, focal] image dimensions and focal length
+        i_split: Indices for train/val/test splits
+    """
     splits = ['train', 'val', 'test']
     metas = {}
     for s in splits:
