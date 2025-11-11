@@ -260,26 +260,48 @@ def create_nerf(args):
 
 
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
-    """Transforms model's predictions to semantically meaningful values.
+    """
+    Transforms model's predictions to semantically meaningful values using volume rendering.
+
+    This implements the classical volume rendering integral described in Section 4:
+    C(r) = ∫ T(t) · σ(t) · c(t) dt
+
+    where:
+    - C(r) is the expected color along ray r
+    - T(t) = exp(-∫₀ᵗ σ(s)ds) is the transmittance (probability ray travels to t without hitting anything)
+    - σ(t) is the volume density at point t
+    - c(t) is the RGB color at point t
+
+    The continuous integral is approximated using quadrature (numerical integration)
+    with stratified sampling along the ray.
+
     Args:
-        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
-        z_vals: [num_rays, num_samples along ray]. Integration time.
+        raw: [num_rays, num_samples along ray, 4]. Prediction from model (RGB + σ).
+        z_vals: [num_rays, num_samples along ray]. Sample distances along each ray.
         rays_d: [num_rays, 3]. Direction of each ray.
     Returns:
         rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
-        disp_map: [num_rays]. Disparity map. Inverse of depth map.
-        acc_map: [num_rays]. Sum of weights along each ray.
+        disp_map: [num_rays]. Disparity map (inverse depth).
+        acc_map: [num_rays]. Accumulated opacity (sum of weights).
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
-        depth_map: [num_rays]. Estimated distance to object.
+        depth_map: [num_rays]. Expected distance to surface.
     """
+    # Function to convert raw density to alpha (opacity) using exponential
+    # Formula: α = 1 - exp(-σ·δ), where δ is the distance between samples
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
+    # Compute distances between adjacent samples
     dists = z_vals[...,1:] - z_vals[...,:-1]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    # Last distance is set to infinity to handle ray endpoints
 
+    # Scale distances by ray direction norm to get actual Euclidean distances
     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
+    # Apply sigmoid to get RGB in [0, 1]
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+
+    # Optional: Add noise to density predictions during training for regularization
     noise = 0.
     if raw_noise_std > 0.:
         noise = torch.randn(raw[...,3].shape) * raw_noise_std
@@ -290,15 +312,26 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
 
+    # Compute alpha (opacity) from density
     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+
+    # Compute transmittance T(t) = exp(-∫₀ᵗ σ(s)ds)
+    # Using the cumulative product: T_i = ∏ⱼ₌₁ⁱ⁻¹ (1 - αⱼ)
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
+    # weights[i] = T_i · α_i represents the probability that ray terminates at sample i
+
+    # Compute expected color using quadrature: C = Σ wᵢ·cᵢ
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
 
+    # Compute expected depth: E[t] = Σ wᵢ·tᵢ
     depth_map = torch.sum(weights * z_vals, -1)
+    # Compute disparity (inverse depth)
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
+    # Accumulated opacity: how much "stuff" is along the ray
     acc_map = torch.sum(weights, -1)
 
+    # If white background, composite the predicted RGB with white background
     if white_bkgd:
         rgb_map = rgb_map + (1.-acc_map[...,None])
 
@@ -318,24 +351,40 @@ def render_rays(ray_batch,
                 raw_noise_std=0.,
                 verbose=False,
                 pytest=False):
-    """Volumetric rendering.
+    """
+    Volumetric rendering of a batch of rays using stratified and hierarchical sampling.
+
+    This implements the core rendering algorithm described in Sections 4 and 5.2:
+
+    1. Stratified Sampling (Section 4):
+       - Divide ray into N_samples bins
+       - Sample one point randomly within each bin
+       - Query coarse network at each sample point
+
+    2. Hierarchical Volume Sampling (Section 5.2):
+       - Use coarse network weights to guide fine network sampling
+       - Sample N_importance additional points in high-density regions
+       - Query fine network with combined samples for final output
+
+    This two-stage approach allows efficient sampling by focusing computation
+    on relevant parts of the scene.
+
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
         for sampling along a ray, including: ray origin, ray direction, min
         dist, max dist, and unit-magnitude viewing direction.
       network_fn: function. Model for predicting RGB and density at each point
-        in space.
+        in space (coarse network).
       network_query_fn: function used for passing queries to network_fn.
-      N_samples: int. Number of different times to sample along each ray.
+      N_samples: int. Number of coarse samples along each ray (typically 64).
       retraw: bool. If True, include model's raw, unprocessed predictions.
-      lindisp: bool. If True, sample linearly in inverse depth rather than in depth.
-      perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
-        random points in time.
-      N_importance: int. Number of additional times to sample along each ray.
+      lindisp: bool. If True, sample linearly in inverse depth (disparity) rather than depth.
+      perturb: float, 0 or 1. If non-zero, use stratified sampling with random jitter.
+      N_importance: int. Number of additional fine samples along each ray (typically 128).
         These samples are only passed to network_fine.
       network_fine: "fine" network with same spec as network_fn.
       white_bkgd: bool. If True, assume a white background.
-      raw_noise_std: ...
+      raw_noise_std: float. Standard deviation of noise added to sigma for regularization.
       verbose: bool. If True, print more debugging info.
     Returns:
       rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
@@ -348,26 +397,35 @@ def render_rays(ray_batch,
       z_std: [num_rays]. Standard deviation of distances along ray for each
         sample.
     """
+    # ========== COARSE NETWORK: Stratified Sampling ==========
+    # Extract ray information from the batch
     N_rays = ray_batch.shape[0]
-    rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
-    viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
+    rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each - origin and direction
+    viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None  # viewing direction for view-dependent effects
     bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
-    near, far = bounds[...,0], bounds[...,1] # [-1,1]
+    near, far = bounds[...,0], bounds[...,1] # [N_rays, 1] - near and far bounds for each ray
 
+    # Create stratified samples along the ray
+    # Divide [near, far] into N_samples bins and sample within each bin
     t_vals = torch.linspace(0., 1., steps=N_samples)
     if not lindisp:
+        # Sample linearly in depth: z = near + t*(far - near)
         z_vals = near * (1.-t_vals) + far * (t_vals)
     else:
+        # Sample linearly in disparity (inverse depth): 1/z = 1/near + t*(1/far - 1/near)
+        # This allocates more samples to nearby regions
         z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
 
     z_vals = z_vals.expand([N_rays, N_samples])
 
+    # Add random jitter for stratified sampling (Section 4)
+    # This prevents aliasing and helps the network learn a continuous representation
     if perturb > 0.:
         # get intervals between samples
         mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
         upper = torch.cat([mids, z_vals[...,-1:]], -1)
         lower = torch.cat([z_vals[...,:1], mids], -1)
-        # stratified samples in those intervals
+        # stratified samples in those intervals: sample uniformly within each bin
         t_rand = torch.rand(z_vals.shape)
 
         # Pytest, overwrite u with numpy's fixed random numbers
@@ -378,28 +436,41 @@ def render_rays(ray_batch,
 
         z_vals = lower + (upper - lower) * t_rand
 
+    # Compute 3D sample points along rays: r(t) = o + t*d
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
-
-#     raw = run_network(pts)
+    # Query the coarse network to get RGB and density predictions
+    #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
+    # Render using volume rendering to get RGB, disparity, opacity, etc.
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
+    # ========== FINE NETWORK: Hierarchical Sampling ==========
+    # If using hierarchical sampling (Section 5.2), use coarse weights to guide fine sampling
     if N_importance > 0:
 
+        # Save coarse network outputs
         rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
 
-        z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        # Use the coarse network's weights to sample additional points
+        # The intuition: sample more densely where the coarse network thinks there's geometry
+        z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])  # Midpoints of coarse bins
+        # Use inverse transform sampling to draw N_importance samples from the PDF
+        # defined by the coarse network weights (which encode density)
         z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
-        z_samples = z_samples.detach()
+        z_samples = z_samples.detach()  # Don't backprop through sampling
 
+        # Combine coarse and fine samples, then sort along each ray
+        # This gives us N_samples + N_importance total samples per ray
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
 
+        # Query the fine network (or coarse if fine doesn't exist)
         run_fn = network_fn if network_fine is None else network_fine
 #         raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
+        # Render with the fine network's predictions (these are the final outputs)
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
@@ -757,26 +828,35 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
+        # Render the batch of rays using both coarse and fine networks
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
         optimizer.zero_grad()
+
+        # Compute loss: Mean Squared Error between rendered RGB and ground truth
+        # This is the photometric loss described in the paper
         img_loss = img2mse(rgb, target_s)
         trans = extras['raw'][...,-1]
         loss = img_loss
-        psnr = mse2psnr(img_loss)
+        psnr = mse2psnr(img_loss)  # Peak Signal-to-Noise Ratio for logging
 
+        # If using hierarchical sampling, also compute loss for coarse network
+        # Both networks are trained simultaneously (Section 5.2)
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
-            loss = loss + img_loss0
+            loss = loss + img_loss0  # Total loss = fine_loss + coarse_loss
             psnr0 = mse2psnr(img_loss0)
 
+        # Backpropagation and optimization step
         loss.backward()
         optimizer.step()
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###
+        # Exponential learning rate decay (Section 5.3)
+        # Learning rate decays by 10x over the course of training
         decay_rate = 0.1
         decay_steps = args.lrate_decay * 1000
         new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
