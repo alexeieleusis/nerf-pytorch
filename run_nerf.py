@@ -888,13 +888,13 @@ def save_video_renders(i, render_poses, hwf, K, args, render_kwargs_test, basedi
     imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
 
 
-def save_testset_renders(i, poses, i_test, hwf, K, args, render_kwargs_test, images, basedir, expname):
+def save_testset_renders(i, poses, i_test, hwf, k, args, render_kwargs_test, images, basedir, expname):
     """Save test set renders."""
     testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
     os.makedirs(testsavedir, exist_ok=True)
     print('test poses shape', poses[i_test].shape)
     with torch.no_grad():
-        render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+        render_path(torch.Tensor(poses[i_test]).to(device), hwf, k, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
     print('Saved test set')
 
 
