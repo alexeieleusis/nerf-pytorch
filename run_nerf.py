@@ -864,7 +864,6 @@ def train():
             param_group['lr'] = new_lrate
         ################################
 
-        dt = time.time()-time0
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
         #####           end            #####
 
