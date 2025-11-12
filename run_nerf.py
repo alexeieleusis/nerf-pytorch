@@ -807,15 +807,15 @@ def train():
                 rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
 
                 if i < args.precrop_iters:
-                    dH = int(H//2 * args.precrop_frac)
+                    d_h = int(H//2 * args.precrop_frac)
                     d_w = int(W//2 * args.precrop_frac)
                     coords = torch.stack(
                         torch.meshgrid(
-                            torch.linspace(H//2 - dH, H//2 + dH - 1, 2*dH),
+                            torch.linspace(H//2 - d_h, H//2 + d_h - 1, 2*d_h),
                             torch.linspace(W//2 - d_w, W//2 + d_w - 1, 2*d_w)
                         ), -1)
                     if i == start:
-                        print(f"[Config] Center cropping of size {2*dH} x {2*d_w} is enabled until iter {args.precrop_iters}")                
+                        print(f"[Config] Center cropping of size {2*d_h} x {2*d_w} is enabled until iter {args.precrop_iters}")                
                 else:
                     coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
 
