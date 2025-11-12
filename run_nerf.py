@@ -308,8 +308,8 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
         # Overwrite randomly sampled data if pytest
         if pytest:
-            np.random.seed(0)
-            noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
+            generator = np.random.default_rng(0)
+            noise = generator.random(raw[...,3].shape) * raw_noise_std
             noise = torch.Tensor(noise)
 
     # Compute alpha (opacity) from density
