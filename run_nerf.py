@@ -345,7 +345,7 @@ def render_rays(ray_batch,
                 retraw=False,
                 lindisp=False,
                 perturb=0.,
-                N_importance=0,
+                n_importance=0,
                 network_fine=None,
                 white_bkgd=False,
                 raw_noise_std=0.,
@@ -362,7 +362,7 @@ def render_rays(ray_batch,
 
     2. Hierarchical Volume Sampling (Section 5.2):
        - Use coarse network weights to guide fine network sampling
-       - Sample N_importance additional points in high-density regions
+       - Sample n_importance additional points in high-density regions
        - Query fine network with combined samples for final output
 
     This two-stage approach allows efficient sampling by focusing computation
@@ -379,7 +379,7 @@ def render_rays(ray_batch,
       retraw: bool. If True, include model's raw, unprocessed predictions.
       lindisp: bool. If True, sample linearly in inverse depth (disparity) rather than depth.
       perturb: float, 0 or 1. If non-zero, use stratified sampling with random jitter.
-      N_importance: int. Number of additional fine samples along each ray (typically 128).
+      n_importance: int. Number of additional fine samples along each ray (typically 128).
         These samples are only passed to network_fine.
       network_fine: "fine" network with same spec as network_fn.
       white_bkgd: bool. If True, assume a white background.
@@ -445,7 +445,7 @@ def render_rays(ray_batch,
 
     # ========== FINE NETWORK: Hierarchical Sampling ==========
     # If using hierarchical sampling (Section 5.2), use coarse weights to guide fine sampling
-    if N_importance > 0:
+    if n_importance > 0:
 
         # Save coarse network outputs
         rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
@@ -453,15 +453,15 @@ def render_rays(ray_batch,
         # Use the coarse network's weights to sample additional points
         # The intuition: sample more densely where the coarse network thinks there's geometry
         z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])  # Midpoints of coarse bins
-        # Use inverse transform sampling to draw N_importance samples from the PDF
+        # Use inverse transform sampling to draw n_importance samples from the PDF
         # defined by the coarse network weights (which encode density)
-        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb <= 0.), pytest=pytest)
+        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], n_importance, det=(perturb <= 0.), pytest=pytest)
         z_samples = z_samples.detach()  # Don't backprop through sampling
 
         # Combine coarse and fine samples, then sort along each ray
-        # This gives us N_samples + N_importance total samples per ray
+        # This gives us N_samples + n_importance total samples per ray
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
-        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
+        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + n_importance, 3]
 
         # Query the fine network (or coarse if fine doesn't exist)
         run_fn = network_fn if network_fine is None else network_fine
@@ -473,7 +473,7 @@ def render_rays(ray_batch,
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
         ret['raw'] = raw
-    if N_importance > 0:
+    if n_importance > 0:
         ret['rgb0'] = rgb_map_0
         ret['disp0'] = disp_map_0
         ret['acc0'] = acc_map_0
