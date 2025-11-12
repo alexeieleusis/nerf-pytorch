@@ -670,9 +670,9 @@ def train():
         print('Loaded deepvoxels', images.shape, render_poses.shape, hwf, args.datadir)
         i_train, i_val, i_test = i_split
 
-        hemi_R = np.mean(np.linalg.norm(poses[:,:3,-1], axis=-1))
-        near = hemi_R-1.
-        far = hemi_R+1.
+        hemi_r = np.mean(np.linalg.norm(poses[:,:3,-1], axis=-1))
+        near = hemi_r-1.
+        far = hemi_r+1.
 
     else:
         print('Unknown dataset type', args.dataset_type, 'exiting')
