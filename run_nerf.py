@@ -847,7 +847,6 @@ def train():
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
             loss = loss + img_loss0  # Total loss = fine_loss + coarse_loss
-            psnr0 = mse2psnr(img_loss0)
 
         # Backpropagation and optimization step
         loss.backward()
