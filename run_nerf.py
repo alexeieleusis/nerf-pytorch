@@ -798,7 +798,8 @@ def train():
 
         else:
             # Random from one image
-            img_i = np.random.choice(i_train)
+            rng = np.random.default_rng(0)
+            img_i = rng.choice(i_train)
             target = images[img_i]
             target = torch.Tensor(target).to(device)
             pose = poses[img_i, :3,:4]
