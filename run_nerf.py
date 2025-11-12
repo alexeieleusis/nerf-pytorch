@@ -20,7 +20,7 @@ from load_LINEMOD import load_linemod_data
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-np.random.seed(0)
+rng = np.random.default_rng(0)
 DEBUG = False
 
 
@@ -756,7 +756,7 @@ def train():
         rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
         rays_rgb = rays_rgb.astype(np.float32)
         print('shuffle rays')
-        np.random.shuffle(rays_rgb)
+        rng.shuffle(rays_rgb)
 
         print('done')
         i_batch = 0
