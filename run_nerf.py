@@ -901,7 +901,7 @@ def run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_ba
                       i_train, images, poses, hwf, K, render_kwargs_train, render_kwargs_test,
                       optimizer, global_step, render_poses, i_test, i_val):
     """Run the main training loop."""
-    H, W, focal = hwf
+    H, W, _ = hwf
     basedir = args.basedir
     expname = args.expname
 
