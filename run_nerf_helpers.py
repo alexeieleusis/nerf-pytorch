@@ -224,7 +224,7 @@ class NeRF(nn.Module):
 
 
 # Ray helpers
-def get_rays(h, w, K, c2w):
+def get_rays(h, w, k, c2w):
     """
     Generate ray origins and directions for all pixels in an image.
 
@@ -236,7 +236,7 @@ def get_rays(h, w, K, c2w):
 
     Args:
         h, w: Image height and width in pixels
-        K: Camera intrinsic matrix [3x3] containing focal length and principal point
+        k: Camera intrinsic matrix [3x3] containing focal length and principal point
         c2w: Camera-to-world transformation matrix [3x4] (extrinsics)
 
     Returns:
@@ -249,9 +249,9 @@ def get_rays(h, w, K, c2w):
     j = j.t()
 
     # Convert pixel coordinates to normalized camera coordinates using intrinsics
-    # K[0][0] = focal_x, K[1][1] = focal_y, K[0][2] = cx, K[1][2] = cy
+    # k[0][0] = focal_x, k[1][1] = focal_y, k[0][2] = cx, k[1][2] = cy
     # This gives us ray directions in the camera coordinate system
-    dirs = torch.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -torch.ones_like(i)], -1)
+    dirs = torch.stack([(i-k[0][2])/k[0][0], -(j-k[1][2])/k[1][1], -torch.ones_like(i)], -1)
 
     # Rotate ray directions from camera frame to the world frame
     rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
