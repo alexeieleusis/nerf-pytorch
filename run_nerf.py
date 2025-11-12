@@ -829,7 +829,7 @@ def train():
 
         #####  Core optimization loop  #####
         # Render the batch of rays using both coarse and fine networks
-        rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+        rgb, _, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
                                                 verbose=i < 10, retraw=True,
                                                 **render_kwargs_train)
 
