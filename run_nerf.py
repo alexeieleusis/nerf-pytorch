@@ -430,8 +430,8 @@ def render_rays(ray_batch,
 
         # Pytest, overwrite u with numpy's fixed random numbers
         if pytest:
-            np.random.seed(0)
-            t_rand = np.random.rand(*list(z_vals.shape))
+            rng = np.random.default_rng(0)
+            t_rand = rng.random(z_vals.shape)
             t_rand = torch.Tensor(t_rand)
 
         z_vals = lower + (upper - lower) * t_rand
