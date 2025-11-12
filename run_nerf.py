@@ -338,6 +338,37 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     return rgb_map, disp_map, acc_map, weights, depth_map
 
 
+def apply_stratified_sampling(z_vals, perturb, pytest):
+    """
+    Apply stratified sampling with random jitter to depth values.
+
+    Args:
+        z_vals: Depth values along rays [N_rays, N_samples]
+        perturb: float, 0 or 1. If non-zero, use stratified sampling with random jitter.
+        pytest: bool. If True, use fixed random seed for reproducibility.
+
+    Returns:
+        z_vals: Jittered depth values [N_rays, N_samples]
+    """
+    if perturb <= 0.:
+        return z_vals
+
+    # get intervals between samples
+    mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+    upper = torch.cat([mids, z_vals[...,-1:]], -1)
+    lower = torch.cat([z_vals[...,:1], mids], -1)
+    # stratified samples in those intervals: sample uniformly within each bin
+    t_rand = torch.rand(z_vals.shape)
+
+    # Pytest, overwrite u with numpy's fixed random numbers
+    if pytest:
+        rng = np.random.default_rng(0)
+        t_rand = rng.random(z_vals.shape)
+        t_rand = torch.Tensor(t_rand)
+
+    return lower + (upper - lower) * t_rand
+
+
 def render_rays(ray_batch,
                 network_fn,
                 network_query_fn,
@@ -418,21 +449,7 @@ def render_rays(ray_batch,
 
     # Add random jitter for stratified sampling (Section 4)
     # This prevents aliasing and helps the network learn a continuous representation
-    if perturb > 0.:
-        # get intervals between samples
-        mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-        upper = torch.cat([mids, z_vals[...,-1:]], -1)
-        lower = torch.cat([z_vals[...,:1], mids], -1)
-        # stratified samples in those intervals: sample uniformly within each bin
-        t_rand = torch.rand(z_vals.shape)
-
-        # Pytest, overwrite u with numpy's fixed random numbers
-        if pytest:
-            rng = np.random.default_rng(0)
-            t_rand = rng.random(z_vals.shape)
-            t_rand = torch.Tensor(t_rand)
-
-        z_vals = lower + (upper - lower) * t_rand
+    z_vals = apply_stratified_sampling(z_vals, perturb, pytest)
 
     # Compute 3D sample points along rays: r(t) = o + t*d
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
