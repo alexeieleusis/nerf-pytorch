@@ -602,12 +602,8 @@ def config_parser():
     return parser
 
 
-def train():
-
-    parser = config_parser()
-    args = parser.parse_args()
-
-    # Load data
+def load_dataset(args):
+    """Load dataset based on dataset type and return all necessary data."""
     K = None
     if args.dataset_type == 'llff':
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
@@ -676,8 +672,13 @@ def train():
 
     else:
         print('Unknown dataset type', args.dataset_type, 'exiting')
-        return
+        return None
 
+    return images, poses, render_poses, hwf, K, i_train, i_val, i_test, near, far
+
+
+def prepare_intrinsics(hwf, K):
+    """Cast intrinsics to right types and prepare K matrix."""
     # Cast intrinsics to right types
     H, W, focal = hwf
     H, W = int(H), int(W)
@@ -690,9 +691,11 @@ def train():
             [0, 0, 1]
         ])
 
-    if args.render_test:
-        render_poses = np.array(poses[i_test])
+    return H, W, focal, hwf, K
 
+
+def setup_experiment_dir(args):
+    """Create log directory and copy config files."""
     # Create log dir and copy the config file
     basedir = args.basedir
     expname = args.expname
@@ -707,44 +710,36 @@ def train():
         with open(f, 'w') as file:
             file.write(open(args.config, 'r').read())
 
-    # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, _, optimizer = create_nerf(args)
-    global_step = start
 
-    bds_dict = {
-        'near' : near,
-        'far' : far,
-    }
-    render_kwargs_train.update(bds_dict)
-    render_kwargs_test.update(bds_dict)
+def handle_render_only(args, render_poses, hwf, K, render_kwargs_test, images, i_test, start):
+    """Handle render-only mode and exit."""
+    basedir = args.basedir
+    expname = args.expname
+    print('RENDER ONLY')
+    with torch.no_grad():
+        if args.render_test:
+            # render_test switches to test poses
+            images = images[i_test]
+        else:
+            # Default is smoother render_poses path
+            images = None
 
-    # Move testing data to GPU
-    render_poses = torch.Tensor(render_poses).to(device)
+        testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+        os.makedirs(testsavedir, exist_ok=True)
+        print('test poses shape', render_poses.shape)
 
-    # Short circuit if only rendering out from trained model
-    if args.render_only:
-        print('RENDER ONLY')
-        with torch.no_grad():
-            if args.render_test:
-                # render_test switches to test poses
-                images = images[i_test]
-            else:
-                # Default is smoother render_poses path
-                images = None
+        rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+        print('Done rendering', testsavedir)
+        imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
-            testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
-            os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', render_poses.shape)
 
-            rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
-            print('Done rendering', testsavedir)
-            imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
-
-            return
-
-    # Prepare raybatch tensor if batching random rays
-    n_rand = args.N_rand
+def prepare_ray_batching(args, images, poses, hwf, K, i_train):
+    """Prepare ray batching data for training."""
+    H, W, focal = hwf
     use_batching = not args.no_batching
+    rays_rgb = None
+    i_batch = 0
+
     if use_batching:
         # For random ray batching
         print('get rays')
@@ -757,146 +752,172 @@ def train():
         rays_rgb = rays_rgb.astype(np.float32)
         print('shuffle rays')
         rng.shuffle(rays_rgb)
-
         print('done')
-        i_batch = 0
 
-    # Move training data to GPU
+    return use_batching, rays_rgb, i_batch
+
+
+def get_ray_batch(use_batching, i, i_batch, rays_rgb, n_rand, i_train, images, poses, H, W, K, args, start):
+    """Get a batch of rays for training."""
     if use_batching:
-        images = torch.Tensor(images).to(device)
-    poses = torch.Tensor(poses).to(device)
-    if use_batching:
-        rays_rgb = torch.Tensor(rays_rgb).to(device)
+        # Random over all images
+        batch = rays_rgb[i_batch:i_batch+n_rand] # [B, 2+1, 3*?]
+        batch = torch.transpose(batch, 0, 1)
+        batch_rays, target_s = batch[:2], batch[2]
+
+        i_batch += n_rand
+        if i_batch >= rays_rgb.shape[0]:
+            print("Shuffle data after an epoch!")
+            rand_idx = torch.randperm(rays_rgb.shape[0])
+            rays_rgb = rays_rgb[rand_idx]
+            i_batch = 0
+    else:
+        # Random from one image
+        rng = np.random.default_rng(0)
+        img_i = rng.choice(i_train)
+        target = images[img_i]
+        target = torch.Tensor(target).to(device)
+        pose = poses[img_i, :3,:4]
+
+        if n_rand is not None:
+            rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
+
+            if i < args.precrop_iters:
+                d_h = int(H//2 * args.precrop_frac)
+                d_w = int(W//2 * args.precrop_frac)
+                coords = torch.stack(
+                    torch.meshgrid(
+                        torch.linspace(H//2 - d_h, H//2 + d_h - 1, 2*d_h),
+                        torch.linspace(W//2 - d_w, W//2 + d_w - 1, 2*d_w)
+                    ), -1)
+                if i == start:
+                    print(f"[Config] Center cropping of size {2*d_h} x {2*d_w} is enabled until iter {args.precrop_iters}")
+            else:
+                coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
+
+            coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
+            rng = np.random.default_rng(0)
+            select_inds = rng.choice(coords.shape[0], size=n_rand, replace=False)  # (N_rand,)
+            select_coords = coords[select_inds].long()  # (N_rand, 2)
+            rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+            rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+            batch_rays = torch.stack([rays_o, rays_d], 0)
+            target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+
+    return batch_rays, target_s, i_batch, rays_rgb
 
 
-    n_iters = 200000 + 1
+def train_step(i, batch_rays, target_s, H, W, K, args, render_kwargs_train, optimizer, global_step):
+    """Perform a single training step."""
+    #####  Core optimization loop  #####
+    # Render the batch of rays using both coarse and fine networks
+    rgb, _, _, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+                                            verbose=i < 10, retraw=True,
+                                            **render_kwargs_train)
+
+    optimizer.zero_grad()
+
+    # Compute loss: Mean Squared Error between rendered RGB and ground truth
+    # This is the photometric loss described in the paper
+    img_loss = img2mse(rgb, target_s)
+    loss = img_loss
+    psnr = mse2psnr(img_loss)  # Peak Signal-to-Noise Ratio for logging
+
+    # If using hierarchical sampling, also compute loss for coarse network
+    # Both networks are trained simultaneously (Section 5.2)
+    if 'rgb0' in extras:
+        img_loss0 = img2mse(extras['rgb0'], target_s)
+        loss = loss + img_loss0  # Total loss = fine_loss + coarse_loss
+
+    # Backpropagation and optimization step
+    loss.backward()
+    optimizer.step()
+
+    # NOTE: IMPORTANT!
+    ###   update learning rate   ###
+    # Exponential learning rate decay (Section 5.3)
+    # Learning rate decays by 10x over the course of training
+    decay_rate = 0.1
+    decay_steps = args.lrate_decay * 1000
+    new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = new_lrate
+    ################################
+
+    return loss, psnr
+
+
+def save_checkpoint(i, global_step, render_kwargs_train, optimizer, basedir, expname):
+    """Save model checkpoint."""
+    path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
+    torch.save({
+        'global_step': global_step,
+        'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
+        'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }, path)
+    print('Saved checkpoints at', path)
+
+
+def save_video_renders(i, render_poses, hwf, K, args, render_kwargs_test, basedir, expname):
+    """Save video renders of the scene."""
+    with torch.no_grad():
+        rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+    print('Done, saving', rgbs.shape, disps.shape)
+    moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+    imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
+    imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
+
+
+def save_testset_renders(i, poses, i_test, hwf, K, args, render_kwargs_test, images, basedir, expname):
+    """Save test set renders."""
+    testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
+    os.makedirs(testsavedir, exist_ok=True)
+    print('test poses shape', poses[i_test].shape)
+    with torch.no_grad():
+        render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+    print('Saved test set')
+
+
+def run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_batch,
+                      i_train, images, poses, hwf, K, render_kwargs_train, render_kwargs_test,
+                      optimizer, global_step, render_poses, i_test, i_val):
+    """Run the main training loop."""
+    H, W, focal = hwf
+    basedir = args.basedir
+    expname = args.expname
+
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
     print('VAL views are', i_val)
-
-    # Summary writers
-    # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
 
     start = start + 1
     for i in trange(start, n_iters):
         time0 = time.time()
 
         # Sample random ray batch
-        if use_batching:
-            # Random over all images
-            batch = rays_rgb[i_batch:i_batch+n_rand] # [B, 2+1, 3*?]
-            batch = torch.transpose(batch, 0, 1)
-            batch_rays, target_s = batch[:2], batch[2]
+        batch_rays, target_s, i_batch, rays_rgb = get_ray_batch(
+            use_batching, i, i_batch, rays_rgb, n_rand, i_train,
+            images, poses, H, W, K, args, start-1)
 
-            i_batch += n_rand
-            if i_batch >= rays_rgb.shape[0]:
-                print("Shuffle data after an epoch!")
-                rand_idx = torch.randperm(rays_rgb.shape[0])
-                rays_rgb = rays_rgb[rand_idx]
-                i_batch = 0
-
-        else:
-            # Random from one image
-            rng = np.random.default_rng(0)
-            img_i = rng.choice(i_train)
-            target = images[img_i]
-            target = torch.Tensor(target).to(device)
-            pose = poses[img_i, :3,:4]
-
-            if n_rand is not None:
-                rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
-
-                if i < args.precrop_iters:
-                    d_h = int(H//2 * args.precrop_frac)
-                    d_w = int(W//2 * args.precrop_frac)
-                    coords = torch.stack(
-                        torch.meshgrid(
-                            torch.linspace(H//2 - d_h, H//2 + d_h - 1, 2*d_h),
-                            torch.linspace(W//2 - d_w, W//2 + d_w - 1, 2*d_w)
-                        ), -1)
-                    if i == start:
-                        print(f"[Config] Center cropping of size {2*d_h} x {2*d_w} is enabled until iter {args.precrop_iters}")                
-                else:
-                    coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
-
-                coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
-                rng = np.random.default_rng(0)
-                select_inds = rng.choice(coords.shape[0], size=n_rand, replace=False)  # (N_rand,)
-                select_coords = coords[select_inds].long()  # (N_rand, 2)
-                rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-                rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-                batch_rays = torch.stack([rays_o, rays_d], 0)
-                target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-
-        #####  Core optimization loop  #####
-        # Render the batch of rays using both coarse and fine networks
-        rgb, _, _, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
-                                                verbose=i < 10, retraw=True,
-                                                **render_kwargs_train)
-
-        optimizer.zero_grad()
-
-        # Compute loss: Mean Squared Error between rendered RGB and ground truth
-        # This is the photometric loss described in the paper
-        img_loss = img2mse(rgb, target_s)
-        loss = img_loss
-        psnr = mse2psnr(img_loss)  # Peak Signal-to-Noise Ratio for logging
-
-        # If using hierarchical sampling, also compute loss for coarse network
-        # Both networks are trained simultaneously (Section 5.2)
-        if 'rgb0' in extras:
-            img_loss0 = img2mse(extras['rgb0'], target_s)
-            loss = loss + img_loss0  # Total loss = fine_loss + coarse_loss
-
-        # Backpropagation and optimization step
-        loss.backward()
-        optimizer.step()
-
-        # NOTE: IMPORTANT!
-        ###   update learning rate   ###
-        # Exponential learning rate decay (Section 5.3)
-        # Learning rate decays by 10x over the course of training
-        decay_rate = 0.1
-        decay_steps = args.lrate_decay * 1000
-        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lrate
-        ################################
+        # Perform training step
+        loss, psnr = train_step(i, batch_rays, target_s, H, W, K, args,
+                               render_kwargs_train, optimizer, global_step)
 
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
         #####           end            #####
 
         # Rest is logging
         if i%args.i_weights==0:
-            path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
-            torch.save({
-                'global_step': global_step,
-                'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, path)
-            print('Saved checkpoints at', path)
+            save_checkpoint(i, global_step, render_kwargs_train, optimizer, basedir, expname)
 
         if i%args.i_video==0 and i > 0:
-            # Turn on testing mode
-            with torch.no_grad():
-                rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-            print('Done, saving', rgbs.shape, disps.shape)
-            moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-            imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
+            save_video_renders(i, render_poses, hwf, K, args, render_kwargs_test, basedir, expname)
 
         if i%args.i_testset==0 and i > 0:
-            testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
-            os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', poses[i_test].shape)
-            with torch.no_grad():
-                render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
-            print('Saved test set')
+            save_testset_renders(i, poses, i_test, hwf, K, args, render_kwargs_test, images, basedir, expname)
 
-
-    
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
         """
@@ -942,6 +963,64 @@ def train():
         """
 
         global_step += 1
+
+
+def train():
+    """Main training function."""
+    parser = config_parser()
+    args = parser.parse_args()
+
+    # Load data
+    dataset_result = load_dataset(args)
+    if dataset_result is None:
+        return
+
+    images, poses, render_poses, hwf, K, i_train, i_val, i_test, near, far = dataset_result
+
+    # Prepare intrinsics
+    H, W, focal, hwf, K = prepare_intrinsics(hwf, K)
+
+    if args.render_test:
+        render_poses = np.array(poses[i_test])
+
+    # Setup experiment directory
+    setup_experiment_dir(args)
+
+    # Create nerf model
+    render_kwargs_train, render_kwargs_test, start, _, optimizer = create_nerf(args)
+    global_step = start
+
+    bds_dict = {
+        'near' : near,
+        'far' : far,
+    }
+    render_kwargs_train.update(bds_dict)
+    render_kwargs_test.update(bds_dict)
+
+    # Move testing data to GPU
+    render_poses = torch.Tensor(render_poses).to(device)
+
+    # Short circuit if only rendering out from trained model
+    if args.render_only:
+        handle_render_only(args, render_poses, hwf, K, render_kwargs_test, images, i_test, start)
+        return
+
+    # Prepare raybatch tensor if batching random rays
+    n_rand = args.N_rand
+    use_batching, rays_rgb, i_batch = prepare_ray_batching(args, images, poses, hwf, K, i_train)
+
+    # Move training data to GPU
+    if use_batching:
+        images = torch.Tensor(images).to(device)
+    poses = torch.Tensor(poses).to(device)
+    if use_batching:
+        rays_rgb = torch.Tensor(rays_rgb).to(device)
+
+    # Run training loop
+    n_iters = 200000 + 1
+    run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_batch,
+                      i_train, images, poses, hwf, K, render_kwargs_train, render_kwargs_test,
+                      optimizer, global_step, render_poses, i_test, i_val)
 
 
 if __name__=='__main__':
