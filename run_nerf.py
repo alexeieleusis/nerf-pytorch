@@ -341,7 +341,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 def render_rays(ray_batch,
                 network_fn,
                 network_query_fn,
-                N_samples,
+                n_samples,
                 retraw=False,
                 lindisp=False,
                 perturb=0.,
@@ -356,7 +356,7 @@ def render_rays(ray_batch,
     This implements the core rendering algorithm described in Sections 4 and 5.2:
 
     1. Stratified Sampling (Section 4):
-       - Divide ray into N_samples bins
+       - Divide ray into n_samples bins
        - Sample one point randomly within each bin
        - Query coarse network at each sample point
 
@@ -375,7 +375,7 @@ def render_rays(ray_batch,
       network_fn: function. Model for predicting RGB and density at each point
         in space (coarse network).
       network_query_fn: function used for passing queries to network_fn.
-      N_samples: int. Number of coarse samples along each ray (typically 64).
+      n_samples: int. Number of coarse samples along each ray (typically 64).
       retraw: bool. If True, include model's raw, unprocessed predictions.
       lindisp: bool. If True, sample linearly in inverse depth (disparity) rather than depth.
       perturb: float, 0 or 1. If non-zero, use stratified sampling with random jitter.
@@ -404,8 +404,8 @@ def render_rays(ray_batch,
     near, far = bounds[...,0], bounds[...,1] # [N_rays, 1] - near and far bounds for each ray
 
     # Create stratified samples along the ray
-    # Divide [near, far] into N_samples bins and sample within each bin
-    t_vals = torch.linspace(0., 1., steps=N_samples)
+    # Divide [near, far] into n_samples bins and sample within each bin
+    t_vals = torch.linspace(0., 1., steps=n_samples)
     if not lindisp:
         # Sample linearly in depth: z = near + t*(far - near)
         z_vals = near * (1.-t_vals) + far * (t_vals)
@@ -414,7 +414,7 @@ def render_rays(ray_batch,
         # This allocates more samples to nearby regions
         z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
 
-    z_vals = z_vals.expand([n_rays, N_samples])
+    z_vals = z_vals.expand([n_rays, n_samples])
 
     # Add random jitter for stratified sampling (Section 4)
     # This prevents aliasing and helps the network learn a continuous representation
@@ -459,9 +459,9 @@ def render_rays(ray_batch,
         z_samples = z_samples.detach()  # Don't backprop through sampling
 
         # Combine coarse and fine samples, then sort along each ray
-        # This gives us N_samples + n_importance total samples per ray
+        # This gives us n_samples + n_importance total samples per ray
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
-        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + n_importance, 3]
+        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, n_samples + n_importance, 3]
 
         # Query the fine network (or coarse if fine doesn't exist)
         run_fn = network_fn if network_fine is None else network_fine
