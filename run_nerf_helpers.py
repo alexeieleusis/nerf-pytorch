@@ -107,7 +107,7 @@ class NeRF(nn.Module):
     - Density σ depends only on position (x,y,z)
     - RGB color c depends on both position and viewing direction
     """
-    def __init__(self, depth=8, w=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+    def __init__(self, depth=8, w=256, input_ch=3, input_ch_views=3, output_ch=4, skips=None, use_viewdirs=False):
         """
         Args:
             depth: Number of layers in the main MLP
@@ -119,6 +119,8 @@ class NeRF(nn.Module):
             use_viewdirs: Whether to use viewing direction as input (enables view-dependent effects)
         """
         super(NeRF, self).__init__()
+        if skips is None:
+            skips = [4]
         self.D = depth
         self.W = w
         self.input_ch = input_ch
