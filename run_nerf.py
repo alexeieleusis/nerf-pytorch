@@ -996,7 +996,7 @@ def train():
     images, poses, render_poses, hwf, K, i_train, i_val, i_test, near, far = dataset_result
 
     # Prepare intrinsics
-    H, W, _, hwf, K = prepare_intrinsics(hwf, K)
+    H, _, _, hwf, K = prepare_intrinsics(hwf, K)
 
     if args.render_test:
         render_poses = np.array(poses[i_test])
