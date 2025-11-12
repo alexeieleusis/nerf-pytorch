@@ -826,7 +826,7 @@ def get_ray_batch(use_batching, i, i_batch, rays_rgb, n_rand, i_train, images, p
     return batch_rays, target_s, i_batch, rays_rgb
 
 
-def train_step(i, batch_rays, target_s, H, W, K, args, render_kwargs_train, optimizer, global_step):
+def train_step(batch_rays, target_s, H, W, K, args, render_kwargs_train, optimizer, global_step):
     """Perform a single training step."""
     #####  Core optimization loop  #####
     # Render the batch of rays using both coarse and fine networks
@@ -941,7 +941,7 @@ def run_training_loop(args, config: TrainingLoopConfig):
             config.images, config.poses, H, W, config.k, args, start-1)
 
         # Perform training step
-        loss, psnr = train_step(i, batch_rays, target_s, H, W, config.k, args,
+        loss, psnr = train_step(batch_rays, target_s, H, W, config.k, args,
                                config.render_kwargs_train, config.optimizer, config.global_step)
 
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
