@@ -15,7 +15,6 @@ def load_LINEMOD_data(basedir, half_res=False, testskip=1):
         basedir,
         splits=['train', 'val', 'test'],
         testskip=testskip,
-        basedir=None,
         add_extension=False,
         debug_print=True
     )
