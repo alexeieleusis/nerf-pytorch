@@ -399,7 +399,7 @@ def render_rays(ray_batch,
     """
     # ========== COARSE NETWORK: Stratified Sampling ==========
     # Extract ray information from the batch
-    N_rays = ray_batch.shape[0]
+    n_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each - origin and direction
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None  # viewing direction for view-dependent effects
     bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
@@ -416,7 +416,7 @@ def render_rays(ray_batch,
         # This allocates more samples to nearby regions
         z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
 
-    z_vals = z_vals.expand([N_rays, N_samples])
+    z_vals = z_vals.expand([n_rays, N_samples])
 
     # Add random jitter for stratified sampling (Section 4)
     # This prevents aliasing and helps the network learn a continuous representation
