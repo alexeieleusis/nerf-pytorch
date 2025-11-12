@@ -443,7 +443,7 @@ def render_rays(ray_batch,
     #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
     # Render using volume rendering to get RGB, disparity, opacity, etc.
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    rgb_map, disp_map, acc_map, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     # ========== FINE NETWORK: Hierarchical Sampling ==========
     # If using hierarchical sampling (Section 5.2), use coarse weights to guide fine sampling
@@ -470,7 +470,7 @@ def render_rays(ray_batch,
         raw = network_query_fn(pts, viewdirs, run_fn)
 
         # Render with the fine network's predictions (these are the final outputs)
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+        rgb_map, disp_map, acc_map, weights, _ = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
