@@ -912,7 +912,6 @@ def run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_ba
 
     start = start + 1
     for i in trange(start, n_iters):
-        time0 = time.time()
 
         # Sample random ray batch
         batch_rays, target_s, i_batch, rays_rgb = get_ray_batch(
