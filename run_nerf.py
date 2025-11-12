@@ -838,7 +838,6 @@ def train():
         # Compute loss: Mean Squared Error between rendered RGB and ground truth
         # This is the photometric loss described in the paper
         img_loss = img2mse(rgb, target_s)
-        trans = extras['raw'][...,-1]
         loss = img_loss
         psnr = mse2psnr(img_loss)  # Peak Signal-to-Noise Ratio for logging
 
