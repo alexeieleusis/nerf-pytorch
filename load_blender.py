@@ -32,7 +32,7 @@ def load_blender_data(basedir, half_res=False, testskip=1):
         i_split: Indices for train/val/test splits
     """
     # Load data from train/val/test splits using shared utility function
-    metas, all_imgs, all_poses, counts = load_split_data(
+    _, all_imgs, all_poses, counts = load_split_data(
         basedir,
         splits=['train', 'val', 'test'],
         testskip=testskip,
