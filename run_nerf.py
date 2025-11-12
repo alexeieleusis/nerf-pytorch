@@ -898,7 +898,7 @@ def save_testset_renders(i, poses, i_test, hwf, K, args, render_kwargs_test, ima
 
 
 def run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_batch,
-                      i_train, images, poses, hwf, K, render_kwargs_train, render_kwargs_test,
+                      i_train, images, poses, hwf, k, render_kwargs_train, render_kwargs_test,
                       optimizer, global_step, render_poses, i_test, i_val):
     """Run the main training loop."""
     H, W, _ = hwf
@@ -916,10 +916,10 @@ def run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_ba
         # Sample random ray batch
         batch_rays, target_s, i_batch, rays_rgb = get_ray_batch(
             use_batching, i, i_batch, rays_rgb, n_rand, i_train,
-            images, poses, H, W, K, args, start-1)
+            images, poses, H, W, k, args, start-1)
 
         # Perform training step
-        loss, psnr = train_step(i, batch_rays, target_s, H, W, K, args,
+        loss, psnr = train_step(i, batch_rays, target_s, H, W, k, args,
                                render_kwargs_train, optimizer, global_step)
 
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
@@ -930,10 +930,10 @@ def run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_ba
             save_checkpoint(i, global_step, render_kwargs_train, optimizer, basedir, expname)
 
         if i%args.i_video==0 and i > 0:
-            save_video_renders(i, render_poses, hwf, K, args, render_kwargs_test, basedir, expname)
+            save_video_renders(i, render_poses, hwf, k, args, render_kwargs_test, basedir, expname)
 
         if i%args.i_testset==0 and i > 0:
-            save_testset_renders(i, poses, i_test, hwf, K, args, render_kwargs_test, images, basedir, expname)
+            save_testset_renders(i, poses, i_test, hwf, k, args, render_kwargs_test, images, basedir, expname)
 
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
