@@ -743,7 +743,7 @@ def train():
             return
 
     # Prepare raybatch tensor if batching random rays
-    N_rand = args.N_rand
+    n_rand = args.N_rand
     use_batching = not args.no_batching
     if use_batching:
         # For random ray batching
@@ -785,11 +785,11 @@ def train():
         # Sample random ray batch
         if use_batching:
             # Random over all images
-            batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
+            batch = rays_rgb[i_batch:i_batch+n_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
             batch_rays, target_s = batch[:2], batch[2]
 
-            i_batch += N_rand
+            i_batch += n_rand
             if i_batch >= rays_rgb.shape[0]:
                 print("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
@@ -804,7 +804,7 @@ def train():
             target = torch.Tensor(target).to(device)
             pose = poses[img_i, :3,:4]
 
-            if N_rand is not None:
+            if n_rand is not None:
                 rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
 
                 if i < args.precrop_iters:
@@ -822,7 +822,7 @@ def train():
 
                 coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
                 rng = np.random.default_rng(0)
-                select_inds = rng.choice(coords.shape[0], size=N_rand, replace=False)  # (N_rand,)
+                select_inds = rng.choice(coords.shape[0], size=n_rand, replace=False)  # (N_rand,)
                 select_coords = coords[select_inds].long()  # (N_rand, 2)
                 rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
