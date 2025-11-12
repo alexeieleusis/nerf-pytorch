@@ -769,7 +769,7 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 200000 + 1
+    n_iters = 200000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -777,9 +777,9 @@ def train():
 
     # Summary writers
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
-    
+
     start = start + 1
-    for i in trange(start, N_iters):
+    for i in trange(start, n_iters):
         time0 = time.time()
 
         # Sample random ray batch
