@@ -878,10 +878,10 @@ def save_checkpoint(i, global_step, render_kwargs_train, optimizer, basedir, exp
     print('Saved checkpoints at', path)
 
 
-def save_video_renders(i, render_poses, hwf, K, args, render_kwargs_test, basedir, expname):
+def save_video_renders(i, render_poses, hwf, k, args, render_kwargs_test, basedir, expname):
     """Save video renders of the scene."""
     with torch.no_grad():
-        rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+        rgbs, disps = render_path(render_poses, hwf, k, args.chunk, render_kwargs_test)
     print('Done, saving', rgbs.shape, disps.shape)
     moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
     imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
