@@ -66,13 +66,13 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     return all_ret
 
 
-def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
+def render(h, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
     """Render rays
     Args:
-      H: int. Height of image in pixels.
+      h: int. Height of image in pixels.
       W: int. Width of image in pixels.
       focal: float. Focal length of pinhole camera.
       chunk: int. Maximum number of rays to process simultaneously. Used to
@@ -94,7 +94,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     """
     if c2w is not None:
         # special case to render full image
-        rays_o, rays_d = get_rays(H, W, K, c2w)
+        rays_o, rays_d = get_rays(h, W, K, c2w)
     else:
         # use provided ray batch
         rays_o, rays_d = rays
@@ -104,14 +104,14 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
         viewdirs = rays_d
         if c2w_staticcam is not None:
             # special case to visualize effect of viewdirs
-            rays_o, rays_d = get_rays(H, W, K, c2w_staticcam)
+            rays_o, rays_d = get_rays(h, W, K, c2w_staticcam)
         viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
         viewdirs = torch.reshape(viewdirs, [-1,3]).float()
 
     sh = rays_d.shape # [..., 3]
     if ndc:
         # for forward facing scenes
-        rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
+        rays_o, rays_d = ndc_rays(h, W, K[0][0], 1., rays_o, rays_d)
 
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1,3]).float()
