@@ -467,7 +467,6 @@ def render_rays(ray_batch,
 
         # Query the fine network (or coarse if fine doesn't exist)
         run_fn = network_fn if network_fine is None else network_fine
-#         raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
         # Render with the fine network's predictions (these are the final outputs)
