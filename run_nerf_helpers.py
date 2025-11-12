@@ -224,7 +224,7 @@ class NeRF(nn.Module):
 
 
 # Ray helpers
-def get_rays(H, W, K, c2w):
+def get_rays(H, w, K, c2w):
     """
     Generate ray origins and directions for all pixels in an image.
 
@@ -235,16 +235,16 @@ def get_rays(H, W, K, c2w):
     - t is the distance along the ray
 
     Args:
-        H, W: Image height and width in pixels
+        H, w: Image height and width in pixels
         K: Camera intrinsic matrix [3x3] containing focal length and principal point
         c2w: Camera-to-world transformation matrix [3x4] (extrinsics)
 
     Returns:
-        rays_o: [H, W, 3] Ray origins (all equal to camera center in world coordinates)
-        rays_d: [H, W, 3] Ray directions in world coordinates
+        rays_o: [H, w, 3] Ray origins (all equal to camera center in world coordinates)
+        rays_d: [H, w, 3] Ray directions in world coordinates
     """
     # Create pixel coordinate grid
-    i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))  # pytorch's meshgrid has indexing='ij'
+    i, j = torch.meshgrid(torch.linspace(0, w-1, w), torch.linspace(0, H-1, H))  # pytorch's meshgrid has indexing='ij'
     i = i.t()  # Transpose to get correct [H, W] shape
     j = j.t()
 
