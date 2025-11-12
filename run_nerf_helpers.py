@@ -107,10 +107,10 @@ class NeRF(nn.Module):
     - Density σ depends only on position (x,y,z)
     - RGB color c depends on both position and viewing direction
     """
-    def __init__(self, D=8, w=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+    def __init__(self, depth=8, w=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
         """
         Args:
-            D: Number of layers in the main MLP
+            depth: Number of layers in the main MLP
             w: Width (number of channels) of each layer
             input_ch: Number of input channels for position (63 with positional encoding, L=10)
             input_ch_views: Number of input channels for viewing direction (27 with encoding, L=4)
@@ -119,7 +119,7 @@ class NeRF(nn.Module):
             use_viewdirs: Whether to use viewing direction as input (enables view-dependent effects)
         """
         super(NeRF, self).__init__()
-        self.D = D
+        self.D = depth
         self.W = w
         self.input_ch = input_ch
         self.input_ch_views = input_ch_views
@@ -129,7 +129,7 @@ class NeRF(nn.Module):
         # Main MLP for processing position
         # Consists of D layers with skip connections at specified layers
         self.pts_linears = nn.ModuleList(
-            [nn.Linear(input_ch, w)] + [nn.Linear(w, w) if i not in self.skips else nn.Linear(w + input_ch, w) for i in range(D-1)])
+            [nn.Linear(input_ch, w)] + [nn.Linear(w, w) if i not in self.skips else nn.Linear(w + input_ch, w) for i in range(depth-1)])
 
         ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
         # Additional MLP for processing viewing direction (single layer in official implementation)
