@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
+from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 
@@ -897,43 +898,64 @@ def save_testset_renders(i, poses, i_test, hwf, K, args, render_kwargs_test, ima
     print('Saved test set')
 
 
-def run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_batch,
-                      i_train, images, poses, hwf, k, render_kwargs_train, render_kwargs_test,
-                      optimizer, global_step, render_poses, i_test, i_val):
+@dataclass
+class TrainingLoopConfig:
+    """Configuration for the training loop containing all necessary parameters."""
+    start: int
+    n_iters: int
+    n_rand: int
+    use_batching: bool
+    rays_rgb: any
+    i_batch: int
+    i_train: any
+    images: any
+    poses: any
+    hwf: tuple
+    k: any
+    render_kwargs_train: dict
+    render_kwargs_test: dict
+    optimizer: any
+    global_step: int
+    render_poses: any
+    i_test: any
+    i_val: any
+
+
+def run_training_loop(args, config: TrainingLoopConfig):
     """Run the main training loop."""
-    H, W, _ = hwf
+    H, W, _ = config.hwf
     basedir = args.basedir
     expname = args.expname
 
     print('Begin')
-    print('TRAIN views are', i_train)
-    print('TEST views are', i_test)
-    print('VAL views are', i_val)
+    print('TRAIN views are', config.i_train)
+    print('TEST views are', config.i_test)
+    print('VAL views are', config.i_val)
 
-    start = start + 1
-    for i in trange(start, n_iters):
+    start = config.start + 1
+    for i in trange(start, config.n_iters):
 
         # Sample random ray batch
-        batch_rays, target_s, i_batch, rays_rgb = get_ray_batch(
-            use_batching, i, i_batch, rays_rgb, n_rand, i_train,
-            images, poses, H, W, k, args, start-1)
+        batch_rays, target_s, config.i_batch, config.rays_rgb = get_ray_batch(
+            config.use_batching, i, config.i_batch, config.rays_rgb, config.n_rand, config.i_train,
+            config.images, config.poses, H, W, config.k, args, start-1)
 
         # Perform training step
-        loss, psnr = train_step(i, batch_rays, target_s, H, W, k, args,
-                               render_kwargs_train, optimizer, global_step)
+        loss, psnr = train_step(i, batch_rays, target_s, H, W, config.k, args,
+                               config.render_kwargs_train, config.optimizer, config.global_step)
 
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
         #####           end            #####
 
         # Rest is logging
         if i%args.i_weights==0:
-            save_checkpoint(i, global_step, render_kwargs_train, optimizer, basedir, expname)
+            save_checkpoint(i, config.global_step, config.render_kwargs_train, config.optimizer, basedir, expname)
 
         if i%args.i_video==0 and i > 0:
-            save_video_renders(i, render_poses, hwf, k, args, render_kwargs_test, basedir, expname)
+            save_video_renders(i, config.render_poses, config.hwf, config.k, args, config.render_kwargs_test, basedir, expname)
 
         if i%args.i_testset==0 and i > 0:
-            save_testset_renders(i, poses, i_test, hwf, k, args, render_kwargs_test, images, basedir, expname)
+            save_testset_renders(i, config.poses, config.i_test, config.hwf, config.k, args, config.render_kwargs_test, config.images, basedir, expname)
 
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
@@ -979,7 +1001,7 @@ def run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_ba
                         tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
         """
 
-        global_step += 1
+        config.global_step += 1
 
 
 def train():
@@ -1035,9 +1057,27 @@ def train():
 
     # Run training loop
     n_iters = 200000 + 1
-    run_training_loop(args, start, n_iters, n_rand, use_batching, rays_rgb, i_batch,
-                      i_train, images, poses, hwf, K, render_kwargs_train, render_kwargs_test,
-                      optimizer, global_step, render_poses, i_test, i_val)
+    config = TrainingLoopConfig(
+        start=start,
+        n_iters=n_iters,
+        n_rand=n_rand,
+        use_batching=use_batching,
+        rays_rgb=rays_rgb,
+        i_batch=i_batch,
+        i_train=i_train,
+        images=images,
+        poses=poses,
+        hwf=hwf,
+        k=K,
+        render_kwargs_train=render_kwargs_train,
+        render_kwargs_test=render_kwargs_test,
+        optimizer=optimizer,
+        global_step=global_step,
+        render_poses=render_poses,
+        i_test=i_test,
+        i_val=i_val
+    )
+    run_training_loop(args, config)
 
 
 if __name__=='__main__':
