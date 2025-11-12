@@ -457,7 +457,7 @@ def render_rays(ray_batch,
         z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])  # Midpoints of coarse bins
         # Use inverse transform sampling to draw N_importance samples from the PDF
         # defined by the coarse network weights (which encode density)
-        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
+        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb <= 0.), pytest=pytest)
         z_samples = z_samples.detach()  # Don't backprop through sampling
 
         # Combine coarse and fine samples, then sort along each ray
