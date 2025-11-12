@@ -292,7 +292,7 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
 
 
 # Hierarchical sampling (section 5.2)
-def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
+def sample_pdf(bins, weights, n_samples, det=False, pytest=False):
     """
     Hierarchical sampling using inverse transform sampling.
 
@@ -311,12 +311,12 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     Args:
         bins: [N_rays, N_samples-1] Bin centers from coarse sampling
         weights: [N_rays, N_samples-2] Weights from coarse network (proportional to density)
-        N_samples: Number of new samples to draw
+        n_samples: Number of new samples to draw
         det: If True, use deterministic sampling; if False, use random sampling
         pytest: If True, use fixed random seed for reproducibility
 
     Returns:
-        samples: [N_rays, N_samples] New sample locations along each ray
+        samples: [N_rays, n_samples] New sample locations along each ray
     """
     # Get pdf
     weights = weights + 1e-5 # prevent nans and ensure all weights are positive
@@ -327,18 +327,18 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     # Take uniform samples in [0, 1]
     if det:
         # Deterministic: evenly spaced samples
-        u = torch.linspace(0., 1., steps=N_samples)
-        u = u.expand(list(cdf.shape[:-1]) + [N_samples])
+        u = torch.linspace(0., 1., steps=n_samples)
+        u = u.expand(list(cdf.shape[:-1]) + [n_samples])
     else:
         # Stochastic: random samples
-        u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
+        u = torch.rand(list(cdf.shape[:-1]) + [n_samples])
 
     # Pytest, overwrite u with numpy's fixed random numbers
     if pytest:
         rng = np.random.default_rng(0)
-        new_shape = list(cdf.shape[:-1]) + [N_samples]
+        new_shape = list(cdf.shape[:-1]) + [n_samples]
         if det:
-            u = np.linspace(0., 1., N_samples)
+            u = np.linspace(0., 1., n_samples)
             u = np.broadcast_to(u, new_shape)
         else:
             u = rng.random(new_shape)
