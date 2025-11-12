@@ -16,7 +16,7 @@ from run_nerf_helpers import *
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
-from load_LINEMOD import load_LINEMOD_data
+from load_LINEMOD import load_linemod_data
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -651,7 +651,7 @@ def train():
             images = images[...,:3]
 
     elif args.dataset_type == 'LINEMOD':
-        images, poses, render_poses, hwf, K, i_split, near, far = load_LINEMOD_data(args.datadir, args.half_res, args.testskip)
+        images, poses, render_poses, hwf, K, i_split, near, far = load_linemod_data(args.datadir, args.half_res, args.testskip)
         print(f'Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}')
         print(f'[CHECK HERE] near: {near}, far: {far}.')
         i_train, i_val, i_test = i_split

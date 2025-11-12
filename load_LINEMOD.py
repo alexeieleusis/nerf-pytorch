@@ -9,7 +9,7 @@ from data_utils import load_imgs_and_poses_from_meta, load_split_data
 from camera_utils import pose_spherical
 
 
-def load_LINEMOD_data(basedir, half_res=False, testskip=1):
+def load_linemod_data(basedir, half_res=False, testskip=1):
     # Load data from train/val/test splits using shared utility function
     metas, all_imgs, all_poses, counts = load_split_data(
         basedir,
