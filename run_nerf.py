@@ -349,7 +349,6 @@ def render_rays(ray_batch,
                 network_fine=None,
                 white_bkgd=False,
                 raw_noise_std=0.,
-                verbose=False,
                 pytest=False):
     """
     Volumetric rendering of a batch of rays using stratified and hierarchical sampling.
@@ -385,7 +384,6 @@ def render_rays(ray_batch,
       network_fine: "fine" network with same spec as network_fn.
       white_bkgd: bool. If True, assume a white background.
       raw_noise_std: float. Standard deviation of noise added to sigma for regularization.
-      verbose: bool. If True, print more debugging info.
     Returns:
       rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
       disp_map: [num_rays]. Disparity map. 1 / depth.
@@ -811,7 +809,7 @@ def train_step(i, batch_rays, target_s, H, W, K, args, render_kwargs_train, opti
     #####  Core optimization loop  #####
     # Render the batch of rays using both coarse and fine networks
     rgb, _, _, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
-                                            verbose=i < 10, retraw=True,
+                                            retraw=True,
                                             **render_kwargs_train)
 
     optimizer.zero_grad()
