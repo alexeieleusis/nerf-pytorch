@@ -34,14 +34,14 @@ class Embedder:
             out_dim += d
 
         max_freq = self.kwargs['max_freq_log2']  # L-1, where L is number of frequency bands
-        N_freqs = self.kwargs['num_freqs']       # L, number of frequency bands
+        n_freqs = self.kwargs['num_freqs']       # L, number of frequency bands
 
         # Create frequency bands: 2^0, 2^1, 2^2, ..., 2^(L-1)
         # Log sampling means we sample frequencies logarithmically
         if self.kwargs['log_sampling']:
-            freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)
+            freq_bands = 2.**torch.linspace(0., max_freq, steps=n_freqs)
         else:
-            freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
+            freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=n_freqs)
 
         # For each frequency band, apply both sin and cos
         # This creates: [sin(2^0*x), cos(2^0*x), sin(2^1*x), cos(2^1*x), ...]
