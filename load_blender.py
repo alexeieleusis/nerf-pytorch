@@ -36,7 +36,6 @@ def load_blender_data(basedir, half_res=False, testskip=1):
         basedir,
         splits=['train', 'val', 'test'],
         testskip=testskip,
-        basedir=basedir,
         add_extension=True,
         debug_print=False
     )
