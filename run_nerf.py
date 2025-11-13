@@ -696,21 +696,21 @@ def load_dataset(args):
     return images, poses, render_poses, hwf, K, i_train, i_val, i_test, near, far
 
 
-def prepare_intrinsics(hwf, K):
+def prepare_intrinsics(hwf, k):
     """Cast intrinsics to right types and prepare K matrix."""
     # Cast intrinsics to right types
     H, W, focal = hwf
     H, W = int(H), int(W)
     hwf = [H, W, focal]
 
-    if K is None:
-        K = np.array([
+    if k is None:
+        k = np.array([
             [focal, 0, 0.5*W],
             [0, focal, 0.5*H],
             [0, 0, 1]
         ])
 
-    return H, W, focal, hwf, K
+    return H, W, focal, hwf, k
 
 
 def setup_experiment_dir(args):
