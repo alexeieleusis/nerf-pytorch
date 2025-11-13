@@ -754,7 +754,7 @@ def handle_render_only(args, render_poses, hwf, K, render_kwargs_test, images, i
 
 def prepare_ray_batching(args, images, poses, hwf, K, i_train):
     """Prepare ray batching data for training."""
-    H, W, focal = hwf
+    H, W, _ = hwf
     use_batching = not args.no_batching
     rays_rgb = None
     i_batch = 0
