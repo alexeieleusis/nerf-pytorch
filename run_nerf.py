@@ -752,7 +752,7 @@ def handle_render_only(args, render_poses, hwf, K, render_kwargs_test, images, i
         imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
 
-def prepare_ray_batching(args, images, poses, hwf, K, i_train):
+def prepare_ray_batching(args, images, poses, hwf, k, i_train):
     """Prepare ray batching data for training."""
     H, W, _ = hwf
     use_batching = not args.no_batching
@@ -762,7 +762,7 @@ def prepare_ray_batching(args, images, poses, hwf, K, i_train):
     if use_batching:
         # For random ray batching
         print('get rays')
-        rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
+        rays = np.stack([get_rays_np(H, W, k, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
         print('done, concats')
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
         rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
