@@ -776,7 +776,7 @@ def prepare_ray_batching(args, images, poses, hwf, K, i_train):
     return use_batching, rays_rgb, i_batch
 
 
-def get_ray_batch(use_batching, i, i_batch, rays_rgb, n_rand, i_train, images, poses, H, W, K, args, start):
+def get_ray_batch(use_batching, i, i_batch, rays_rgb, n_rand, i_train, images, poses, height, width, intrinsics, args, start):
     """Get a batch of rays for training."""
     if use_batching:
         # Random over all images
@@ -799,20 +799,20 @@ def get_ray_batch(use_batching, i, i_batch, rays_rgb, n_rand, i_train, images, p
         pose = poses[img_i, :3,:4]
 
         if n_rand is not None:
-            rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
+            rays_o, rays_d = get_rays(height, width, intrinsics, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
 
             if i < args.precrop_iters:
-                d_h = int(H//2 * args.precrop_frac)
-                d_w = int(W//2 * args.precrop_frac)
+                d_h = int(height//2 * args.precrop_frac)
+                d_w = int(width//2 * args.precrop_frac)
                 coords = torch.stack(
                     torch.meshgrid(
-                        torch.linspace(H//2 - d_h, H//2 + d_h - 1, 2*d_h),
-                        torch.linspace(W//2 - d_w, W//2 + d_w - 1, 2*d_w)
+                        torch.linspace(height//2 - d_h, height//2 + d_h - 1, 2*d_h),
+                        torch.linspace(width//2 - d_w, width//2 + d_w - 1, 2*d_w)
                     ), -1)
                 if i == start:
                     print(f"[Config] Center cropping of size {2*d_h} x {2*d_w} is enabled until iter {args.precrop_iters}")
             else:
-                coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
+                coords = torch.stack(torch.meshgrid(torch.linspace(0, height-1, height), torch.linspace(0, width-1, width)), -1)  # (H, W, 2)
 
             coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
             rng = np.random.default_rng(0)
