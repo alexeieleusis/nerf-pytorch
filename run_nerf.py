@@ -145,7 +145,7 @@ def render(h, w, k, chunk=1024*32, rays=None, c2w=None, ndc=True,
     return ret_list + [ret_dict]
 
 
-def render_path(render_poses, hwf, k, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(render_poses, hwf, k, chunk, render_kwargs, savedir=None, render_factor=0):
 
     H, W, focal = hwf
 
@@ -770,7 +770,7 @@ def handle_render_only(args, render_poses, hwf, k, render_kwargs_test, images, i
         os.makedirs(testsavedir, exist_ok=True)
         print('test poses shape', render_poses.shape)
 
-        rgbs, _ = render_path(render_poses, hwf, k, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+        rgbs, _ = render_path(render_poses, hwf, k, args.chunk, render_kwargs_test, savedir=testsavedir, render_factor=args.render_factor)
         print('Done rendering', testsavedir)
         imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
@@ -917,7 +917,7 @@ def save_testset_renders(i, poses, i_test, hwf, k, args, render_kwargs_test, ima
     os.makedirs(testsavedir, exist_ok=True)
     print('test poses shape', poses[i_test].shape)
     with torch.no_grad():
-        render_path(torch.Tensor(poses[i_test]).to(device), hwf, k, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+        render_path(torch.Tensor(poses[i_test]).to(device), hwf, k, args.chunk, render_kwargs_test, savedir=testsavedir)
     print('Saved test set')
 
 
