@@ -911,7 +911,7 @@ def save_video_renders(i, render_poses, hwf, k, args, render_kwargs_test, basedi
     imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
 
 
-def save_testset_renders(i, poses, i_test, hwf, k, args, render_kwargs_test, images, basedir, expname):
+def save_testset_renders(i, poses, i_test, hwf, k, args, render_kwargs_test, basedir, expname):
     """Save test set renders."""
     testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
     os.makedirs(testsavedir, exist_ok=True)
@@ -978,7 +978,7 @@ def run_training_loop(args, config: TrainingLoopConfig):
             save_video_renders(i, config.render_poses, config.hwf, config.k, args, config.render_kwargs_test, basedir, expname)
 
         if i%args.i_testset==0 and i > 0:
-            save_testset_renders(i, config.poses, config.i_test, config.hwf, config.k, args, config.render_kwargs_test, config.images, basedir, expname)
+            save_testset_renders(i, config.poses, config.i_test, config.hwf, config.k, args, config.render_kwargs_test, basedir, expname)
 
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
