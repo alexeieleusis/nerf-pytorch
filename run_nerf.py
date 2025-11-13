@@ -621,79 +621,102 @@ def config_parser():
     return parser
 
 
+def _load_llff_dataset(args):
+    """Load LLFF dataset and return processed data."""
+    images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+                                                              recenter=True, bd_factor=.75,
+                                                              spherify=args.spherify)
+    hwf = poses[0,:3,-1]
+    poses = poses[:,:3,:4]
+    print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
+
+    if not isinstance(i_test, list):
+        i_test = [i_test]
+
+    if args.llffhold > 0:
+        print('Auto LLFF holdout,', args.llffhold)
+        i_test = np.arange(images.shape[0])[::args.llffhold]
+
+    i_val = i_test
+    i_train = np.array([i for i in np.arange(int(images.shape[0])) if
+                    (i not in i_test and i not in i_val)])
+
+    print('DEFINING BOUNDS')
+    if args.no_ndc:
+        near = np.ndarray.min(bds) * .9
+        far = np.ndarray.max(bds) * 1.
+    else:
+        near = 0.
+        far = 1.
+    print('NEAR FAR', near, far)
+
+    K = None
+    return images, poses, render_poses, hwf, K, i_train, i_val, i_test, near, far
+
+
+def _load_blender_dataset(args):
+    """Load Blender dataset and return processed data."""
+    images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
+    print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
+    i_train, i_val, i_test = i_split
+
+    near = 2.
+    far = 6.
+
+    if args.white_bkgd:
+        images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
+    else:
+        images = images[...,:3]
+
+    K = None
+    return images, poses, render_poses, hwf, K, i_train, i_val, i_test, near, far
+
+
+def _load_linemod_dataset(args):
+    """Load LINEMOD dataset and return processed data."""
+    images, poses, render_poses, hwf, K, i_split, near, far = load_linemod_data(args.datadir, args.half_res, args.testskip)
+    print(f'Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}')
+    print(f'[CHECK HERE] near: {near}, far: {far}.')
+    i_train, i_val, i_test = i_split
+
+    if args.white_bkgd:
+        images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
+    else:
+        images = images[...,:3]
+
+    return images, poses, render_poses, hwf, K, i_train, i_val, i_test, near, far
+
+
+def _load_deepvoxels_dataset(args):
+    """Load DeepVoxels dataset and return processed data."""
+    images, poses, render_poses, hwf, i_split = load_dv_data(scene=args.shape,
+                                                             basedir=args.datadir,
+                                                             testskip=args.testskip)
+
+    print('Loaded deepvoxels', images.shape, render_poses.shape, hwf, args.datadir)
+    i_train, i_val, i_test = i_split
+
+    hemi_r = np.mean(np.linalg.norm(poses[:,:3,-1], axis=-1))
+    near = hemi_r-1.
+    far = hemi_r+1.
+
+    K = None
+    return images, poses, render_poses, hwf, K, i_train, i_val, i_test, near, far
+
+
 def load_dataset(args):
     """Load dataset based on dataset type and return all necessary data."""
-    K = None
     if args.dataset_type == 'llff':
-        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
-                                                                  recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify)
-        hwf = poses[0,:3,-1]
-        poses = poses[:,:3,:4]
-        print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
-        if not isinstance(i_test, list):
-            i_test = [i_test]
-
-        if args.llffhold > 0:
-            print('Auto LLFF holdout,', args.llffhold)
-            i_test = np.arange(images.shape[0])[::args.llffhold]
-
-        i_val = i_test
-        i_train = np.array([i for i in np.arange(int(images.shape[0])) if
-                        (i not in i_test and i not in i_val)])
-
-        print('DEFINING BOUNDS')
-        if args.no_ndc:
-            near = np.ndarray.min(bds) * .9
-            far = np.ndarray.max(bds) * 1.
-            
-        else:
-            near = 0.
-            far = 1.
-        print('NEAR FAR', near, far)
-
+        return _load_llff_dataset(args)
     elif args.dataset_type == 'blender':
-        images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
-        print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        near = 2.
-        far = 6.
-
-        if args.white_bkgd:
-            images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
-        else:
-            images = images[...,:3]
-
+        return _load_blender_dataset(args)
     elif args.dataset_type == 'LINEMOD':
-        images, poses, render_poses, hwf, K, i_split, near, far = load_linemod_data(args.datadir, args.half_res, args.testskip)
-        print(f'Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}')
-        print(f'[CHECK HERE] near: {near}, far: {far}.')
-        i_train, i_val, i_test = i_split
-
-        if args.white_bkgd:
-            images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
-        else:
-            images = images[...,:3]
-
+        return _load_linemod_dataset(args)
     elif args.dataset_type == 'deepvoxels':
-
-        images, poses, render_poses, hwf, i_split = load_dv_data(scene=args.shape,
-                                                                 basedir=args.datadir,
-                                                                 testskip=args.testskip)
-
-        print('Loaded deepvoxels', images.shape, render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        hemi_r = np.mean(np.linalg.norm(poses[:,:3,-1], axis=-1))
-        near = hemi_r-1.
-        far = hemi_r+1.
-
+        return _load_deepvoxels_dataset(args)
     else:
         print('Unknown dataset type', args.dataset_type, 'exiting')
         return None
-
-    return images, poses, render_poses, hwf, K, i_train, i_val, i_test, near, far
 
 
 def prepare_intrinsics(hwf, k):
