@@ -9,6 +9,8 @@ This document maps the PyTorch implementation to the original paper:
 nerf-pytorch/
 ├── run_nerf.py              # Main training and rendering script
 ├── run_nerf_helpers.py      # Core NeRF components (network, encoding, ray ops)
+├── camera_utils.py          # Camera transformation utilities
+├── data_utils.py            # Dataset loading utilities (shared across loaders)
 ├── load_blender.py          # Synthetic dataset loader
 ├── load_llff.py             # Real-world dataset loader (LLFF format)
 ├── load_deepvoxels.py       # DeepVoxels dataset loader
@@ -64,29 +66,30 @@ where T(t) = exp(-∫₀ᵗ σ(s)ds)
 **Implementation:**
 
 - **File:** `run_nerf.py`
-- **Function:** `raw2outputs()` (lines 262-338)
+- **Function:** `raw2outputs()` (lines 267-343)
 - **Key Details:**
   - Approximates continuous integral using quadrature (stratified sampling)
   - Computes transmittance T(t) using cumulative product
   - Weights each sample by α·T to get final color
 
 ```python
-# Volume rendering from run_nerf.py:262-338
-def raw2outputs(raw, z_vals, rays_d, ...):
+# Volume rendering from run_nerf.py:267-343
+def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     # Convert density to alpha: α = 1 - exp(-σ·δ)
-    alpha = 1. - torch.exp(-F.relu(raw[...,3]) * dists)
+    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    alpha = raw2alpha(raw[...,3] + noise, dists)
 
     # Compute transmittance: T_i = ∏ⱼ₌₁ⁱ⁻¹ (1 - αⱼ)
-    weights = alpha * torch.cumprod(1.-alpha + 1e-10, -1)
+    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
 
     # Compute expected color: C = Σ wᵢ·cᵢ
     rgb_map = torch.sum(weights[...,None] * rgb, -2)
 ```
 
 **Ray Generation:**
-- **Function:** `get_rays()` in `run_nerf_helpers.py:227-261`
+- **Function:** `get_rays()` in `run_nerf_helpers.py:229-262`
 - Generates ray origins and directions for each pixel
-- Uses camera intrinsics K and extrinsics c2w
+- Uses camera intrinsics k and extrinsics c2w
 
 ---
 
@@ -129,41 +132,48 @@ class Embedder:
 **Implementation:**
 
 - **File:** `run_nerf.py`
-- **Function:** `render_rays()` (lines 341-418)
-- **Helper:** `sample_pdf()` in `run_nerf_helpers.py:295-368`
+- **Function:** `render_rays()` (lines 377-510)
+- **Helper:** `apply_stratified_sampling()` (lines 346-374)
+- **Helper:** `sample_pdf()` in `run_nerf_helpers.py:297-370`
 
 **Algorithm:**
 
-1. **Coarse Sampling** (lines 400-446):
-   - Stratified sampling: divide ray into N_samples=64 bins
-   - Sample randomly within each bin
+1. **Coarse Sampling** (lines 434-466):
+   - Stratified sampling: divide ray into n_samples=64 bins
+   - Sample randomly within each bin using `apply_stratified_sampling()`
    - Query coarse network at each sample point
 
 ```python
-# Stratified sampling from run_nerf.py:408-446
-z_vals = near * (1.-t_vals) + far * t_vals  # Linear spacing
-if perturb > 0.:
-    # Add jitter within each bin
-    z_vals = lower + (upper - lower) * torch.rand(...)
-pts = rays_o + rays_d * z_vals  # 3D points
+# Stratified sampling from run_nerf.py:444-464
+# Create stratified samples along the ray
+t_vals = torch.linspace(0., 1., steps=n_samples)
+z_vals = near * (1.-t_vals) + far * (t_vals)  # Linear spacing
+
+# Add random jitter for stratified sampling (Section 4)
+z_vals = apply_stratified_sampling(z_vals, perturb, pytest)
+
+# Compute 3D sample points along rays: r(t) = o + t*d
+pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None]
 raw = network_query_fn(pts, viewdirs, network_fn)
 ```
 
-2. **Fine Sampling** (lines 448-474):
-   - Use coarse weights to sample N_importance=128 additional points
+2. **Fine Sampling** (lines 468-510):
+   - Use coarse weights to sample n_importance=128 additional points
    - Inverse transform sampling concentrates samples in high-density regions
    - Combine with coarse samples, query fine network
 
 ```python
-# Hierarchical sampling from run_nerf.py:448-474
+# Hierarchical sampling from run_nerf.py:468-510
 # Use coarse weights as PDF to guide fine sampling
-z_samples = sample_pdf(z_vals_mid, weights, N_importance)
-z_vals = torch.sort(torch.cat([z_vals, z_samples], -1))
+z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], n_importance, det=(perturb==0.), pytest=pytest)
+z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None]
 raw = network_query_fn(pts, viewdirs, network_fine)
 ```
 
 **Inverse Transform Sampling:**
-- **Function:** `sample_pdf()` in `run_nerf_helpers.py:295-368`
+- **Function:** `sample_pdf()` in `run_nerf_helpers.py:297-370`
 - Converts weights to PDF, computes CDF
 - Samples uniformly from [0,1] and inverts CDF
 - Concentrates samples where weights are high
@@ -175,43 +185,59 @@ raw = network_query_fn(pts, viewdirs, network_fine)
 **Training Configuration:**
 
 - **File:** `run_nerf.py`
-- **Function:** `train()` (lines 534-873)
+- **Function:** `train()` (lines 1030-1109)
+- **Function:** `run_training_loop()` (lines 947-1027)
 
 **Key Hyperparameters:**
 
 | Parameter | Value | Location |
 |-----------|-------|----------|
-| Batch size (random rays) | 4096 | `config_parser()` line 443 |
-| Learning rate | 5e-4 | `config_parser()` line 445 |
-| Learning rate decay | 250k steps | `config_parser()` line 448 |
-| Coarse samples (N_c) | 64 | `config_parser()` line 461 |
-| Fine samples (N_f) | 128 | `config_parser()` line 463 |
-| Network depth | 8 layers | `config_parser()` line 435 |
-| Network width | 256 channels | `config_parser()` line 437 |
-| Training iterations | 200k | `train()` line 701 |
+| Batch size (random rays) | 4096 | `config_parser()` line 533 |
+| Learning rate | 5e-4 | `config_parser()` line 535 |
+| Learning rate decay | 250k steps | `config_parser()` line 537 |
+| Coarse samples (n_samples) | 64 | `config_parser()` line 551 |
+| Fine samples (n_importance) | 128 | `config_parser()` line 553 |
+| Network depth | 8 layers | `config_parser()` line 525 |
+| Network width | 256 channels | `config_parser()` line 527 |
+| Training iterations | 200k | `run_training_loop()` line 959 |
 
 **Training Loop:**
 
 ```python
-# Training loop from run_nerf.py:711-872
-for i in range(200000):
-    # Sample random rays from training images
-    batch_rays, target_s = get_random_rays(...)
+# Main training loop from run_nerf.py:947-1027
+def run_training_loop(args, config: TrainingLoopConfig):
+    for i in range(start, n_iters):
+        # Sample random ray batch (lines 802-849)
+        batch_rays, target_s, ... = get_ray_batch(...)
 
-    # Render rays
-    rgb, disp, acc, extras = render(batch_rays, ...)
+        # Perform training step (lines 852-889)
+        loss, psnr = train_step(batch_rays, target_s, H, W, k, args,
+                               render_kwargs_train, optimizer, global_step)
 
-    # Compute photometric loss
-    loss = img2mse(rgb, target_s)  # Fine network loss
+# Training step from run_nerf.py:852-889
+def train_step(batch_rays, target_s, h, w, k, args, render_kwargs_train, optimizer, global_step):
+    # Render rays using both coarse and fine networks
+    rgb, _, _, extras = render(h, w, k, chunk=args.chunk, rays=batch_rays, **render_kwargs_train)
+
+    # Compute photometric loss (MSE)
+    img_loss = img2mse(rgb, target_s)  # Fine network loss
+    loss = img_loss
+
+    # Add coarse network loss (hierarchical sampling)
     if 'rgb0' in extras:
-        loss += img2mse(extras['rgb0'], target_s)  # Coarse network loss
+        img_loss0 = img2mse(extras['rgb0'], target_s)
+        loss = loss + img_loss0  # Total loss = fine_loss + coarse_loss
 
-    # Optimize
+    # Backprop and optimize
     loss.backward()
     optimizer.step()
 
     # Exponential learning rate decay
-    new_lrate = lrate * (0.1 ** (global_step / decay_steps))
+    new_lrate = args.lrate * (0.1 ** (global_step / decay_steps))
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = new_lrate
+
+    return loss, psnr
 ```
 
 **Loss Function:**
@@ -225,30 +251,31 @@ for i in range(200000):
 
 **Implementation Details:**
 
-- **Optimizer:** Adam (β1=0.9, β2=0.999)
-- **Location:** `run_nerf.py:207`
+- **Optimizer:** Adam (β1=0.9, β2=0.999, weight_decay=0.0)
+- **Location:** `create_nerf()` in `run_nerf.py:212`
 - **Learning Rate Schedule:**
   - Initial: 5×10⁻⁴
   - Exponential decay by 10× over training
-  - `run_nerf.py:860-864`
+  - `train_step()` in `run_nerf.py:882-886`
 
 **Batching Strategy:**
 
 Two modes available:
-1. **Ray Batching** (default): Sample 4096 random rays from all training images
+1. **Ray Batching** (default): Sample random rays from all training images
    - More memory efficient
    - Better gradient estimates
-   - `run_nerf.py:677-698`
+   - Implemented in `prepare_ray_batching()` (`run_nerf.py:778-800`)
+   - Ray sampling in `get_ray_batch()` (`run_nerf.py:802-849`)
 
-2. **Image Batching** (`--no_batching`): Sample rays from one random image
+2. **Image Batching** (`--no_batching`): Sample rays from one random image at a time
    - Simpler implementation
    - Used for debugging
-   - `run_nerf.py:728-757`
+   - Handled in `get_ray_batch()` (`run_nerf.py:802-849`)
 
 **Optional: Center Cropping** (`--precrop_iters`):
 - For first K iterations, only sample rays from image center
 - Helps with scenes where object is centered
-- `run_nerf.py:738-747`
+- Implemented in `get_ray_batch()` (`run_nerf.py:826-846`)
 
 ---
 
@@ -258,7 +285,10 @@ Two modes available:
 
 - **File:** `load_blender.py`
 - **Format:** JSON files with camera poses and RGBA images
-- **Key Function:** `load_blender_data()` (lines 52-89)
+- **Key Function:** `load_blender_data()` (lines 12-67)
+- **Helper Module:** `data_utils.py` - Common utilities for loading images and poses
+  - `load_split_data()` (lines 14-58) - Loads data from train/val/test splits
+  - `load_imgs_and_poses_from_meta()` (lines 61-106) - Loads images and camera poses from JSON
 - **Details:**
   - Camera poses stored as 4×4 transformation matrices
   - Focal length computed from field of view
@@ -289,7 +319,7 @@ Two modes available:
 3. **NDC Rays:**
    - For forward-facing scenes, rays parameterized in normalized device coordinates
    - Helps with unbounded scenes
-   - `run_nerf_helpers.py:246-262`
+   - `ndc_rays()` in `run_nerf_helpers.py:276-295`
 
 ---
 
@@ -362,17 +392,36 @@ python run_nerf.py --config configs/lego.txt --render_only
 
 | Component | File | Lines |
 |-----------|------|-------|
-| Main training loop | `run_nerf.py` | 711-872 |
-| NeRF MLP architecture | `run_nerf_helpers.py` | 95-193 |
-| Positional encoding | `run_nerf_helpers.py` | 21-91 |
-| Volume rendering | `run_nerf.py` | 262-338 |
-| Stratified sampling | `run_nerf.py` | 400-446 |
-| Hierarchical sampling | `run_nerf.py` | 448-474 |
-| Inverse transform sampling | `run_nerf_helpers.py` | 295-368 |
-| Ray generation | `run_nerf_helpers.py` | 227-261 |
-| Data loading (Blender) | `load_blender.py` | 52-89 |
-| Data loading (LLFF) | `load_llff.py` | 62-181 |
-| Config parser | `run_nerf.py` | 421-531 |
+| **Core Training** | | |
+| Main training function | `run_nerf.py` | 1030-1109 |
+| Training loop | `run_nerf.py` | 947-1027 |
+| Training step | `run_nerf.py` | 852-889 |
+| Dataset loading dispatcher | `run_nerf.py` | 707-720 |
+| Ray batch preparation | `run_nerf.py` | 778-800 |
+| Ray batch sampling | `run_nerf.py` | 802-849 |
+| **Network & Rendering** | | |
+| NeRF MLP architecture | `run_nerf_helpers.py` | 95-227 |
+| Create NeRF models | `run_nerf.py` | 183-265 |
+| Positional encoding (Embedder) | `run_nerf_helpers.py` | 21-59 |
+| Get embedder function | `run_nerf_helpers.py` | 61-92 |
+| Volume rendering equation | `run_nerf.py` | 267-343 |
+| Render function (main) | `run_nerf.py` | 80-145 |
+| Render rays (hierarchical) | `run_nerf.py` | 377-510 |
+| **Sampling** | | |
+| Stratified sampling helper | `run_nerf.py` | 346-374 |
+| Inverse transform sampling | `run_nerf_helpers.py` | 297-370 |
+| **Ray Operations** | | |
+| Ray generation (torch) | `run_nerf_helpers.py` | 229-264 |
+| Ray generation (numpy) | `run_nerf_helpers.py` | 266-274 |
+| NDC rays | `run_nerf_helpers.py` | 276-295 |
+| **Data Loading** | | |
+| Blender synthetic data | `load_blender.py` | 12-67 |
+| LLFF real-world data | `load_llff.py` | 62-181 |
+| Common data utilities | `data_utils.py` | 14-106 |
+| Camera pose utilities | `camera_utils.py` | 24-44 |
+| **Configuration** | | |
+| Config parser | `run_nerf.py` | 511-622 |
+| TrainingLoopConfig dataclass | `run_nerf.py` | 925-944 |
 
 ---
 
@@ -411,3 +460,59 @@ python run_nerf.py --config configs/lego.txt --render_only
    - Chunk rays into batches (`--chunk`, `--netchunk`)
    - Process rays and network queries in smaller batches
    - Prevents OOM on consumer GPUs
+
+---
+
+## Code Refactoring History
+
+The codebase has undergone significant refactoring to improve code quality and maintainability:
+
+### New Files Created
+1. **`camera_utils.py`** - Camera transformation utilities
+   - Extracted camera pose generation functions from data loaders
+   - `pose_spherical()` - Generate spherical camera poses for rendering
+
+2. **`data_utils.py`** - Dataset loading utilities
+   - Extracted common dataset loading patterns to reduce code duplication
+   - `load_split_data()` - Load and combine train/val/test splits
+   - `load_imgs_and_poses_from_meta()` - Load images and poses from JSON metadata
+
+### Major Refactoring in `run_nerf.py`
+
+**Training Pipeline Decomposition:**
+The monolithic `train()` function was decomposed into smaller, focused functions:
+- `train()` - Main entry point for training (setup and coordination)
+- `run_training_loop()` - Core training loop iteration
+- `train_step()` - Single training step (forward pass, loss, backprop)
+- `get_ray_batch()` - Sample ray batches for training
+- `prepare_ray_batching()` - Prepare ray batching tensors
+
+**Dataset Loading:**
+Dataset loading extracted into dedicated helper functions:
+- `load_dataset()` - Dispatcher for different dataset types
+- `_load_llff_dataset()` - LLFF dataset loading
+- `_load_blender_dataset()` - Blender dataset loading
+- `_load_linemod_dataset()` - LINEMOD dataset loading
+- `_load_deepvoxels_dataset()` - DeepVoxels dataset loading
+
+**Rendering and Evaluation:**
+Rendering and checkpointing extracted into focused functions:
+- `handle_render_only()` - Handle render-only mode
+- `save_checkpoint()` - Save model checkpoints
+- `save_video_renders()` - Render and save video sequences
+- `save_testset_renders()` - Render and save test set images
+
+**Sampling:**
+Stratified sampling extracted into helper function:
+- `apply_stratified_sampling()` - Apply stratified sampling with jitter
+
+**Configuration:**
+- `TrainingLoopConfig` dataclass - Encapsulates training loop parameters
+- Reduces function parameter count from 19+ to a single config object
+
+**Code Quality Improvements:**
+- Renamed variables to follow Python naming conventions (K→k, H→height, W→width, etc.)
+- Removed unused variables and parameters
+- Removed commented-out code
+- Added comprehensive docstrings with mathematical formulas
+- Improved cognitive complexity by extracting helper functions
