@@ -297,7 +297,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     # Compute distances between adjacent samples
     dists = z_vals[...,1:] - z_vals[...,:-1]
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+    dists = torch.cat([dists, torch.tensor([1e10], device=dists.device).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
     # Last distance is set to infinity to handle ray endpoints
 
     # Scale distances by ray direction norm to get actual Euclidean distances
@@ -309,13 +309,13 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     # Optional: Add noise to density predictions during training for regularization
     noise = 0.
     if raw_noise_std > 0.:
-        noise = torch.randn(raw[...,3].shape) * raw_noise_std
+        noise = torch.randn(raw[...,3].shape, device=raw.device) * raw_noise_std
 
         # Overwrite randomly sampled data if pytest
         if pytest:
             generator = np.random.default_rng(0)
             noise = generator.random(raw[...,3].shape) * raw_noise_std
-            noise = torch.Tensor(noise)
+            noise = torch.tensor(noise, device=raw.device)
 
     # Compute alpha (opacity) from density
     alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
@@ -363,13 +363,13 @@ def apply_stratified_sampling(z_vals, perturb, pytest):
     upper = torch.cat([mids, z_vals[...,-1:]], -1)
     lower = torch.cat([z_vals[...,:1], mids], -1)
     # stratified samples in those intervals: sample uniformly within each bin
-    t_rand = torch.rand(z_vals.shape)
+    t_rand = torch.rand(z_vals.shape, device=z_vals.device)
 
     # Pytest, overwrite u with numpy's fixed random numbers
     if pytest:
         rng = np.random.default_rng(0)
         t_rand = rng.random(z_vals.shape)
-        t_rand = torch.Tensor(t_rand)
+        t_rand = torch.tensor(t_rand, device=z_vals.device)
 
     return lower + (upper - lower) * t_rand
 
@@ -1104,6 +1104,7 @@ def train():
 
 
 if __name__=='__main__':
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    torch.set_default_dtype(torch.float32)
+    torch.set_default_device('cuda')
 
     train()
