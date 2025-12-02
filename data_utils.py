@@ -49,7 +49,7 @@ def load_split_data(basedir, splits=['train', 'val', 'test'], testskip=1, **kwar
             skip = testskip
 
         imgs, poses = load_imgs_and_poses_from_meta(
-            meta, skip=skip, split_name=s, **kwargs
+            meta, basedir=basedir, skip=skip, split_name=s, **kwargs
         )
         counts.append(counts[-1] + imgs.shape[0])
         all_imgs.append(imgs)

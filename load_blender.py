@@ -32,21 +32,21 @@ def load_blender_data(basedir, half_res=False, testskip=1):
         i_split: Indices for train/val/test splits
     """
     # Load data from train/val/test splits using shared utility function
-    _, all_imgs, all_poses, counts = load_split_data(
+    metas, all_imgs, all_poses, counts = load_split_data(
         basedir,
         splits=['train', 'val', 'test'],
         testskip=testskip,
         add_extension=True,
         debug_print=False
     )
-    
+
     i_split = [np.arange(counts[i], counts[i+1]) for i in range(3)]
-    
+
     imgs = np.concatenate(all_imgs, 0)
     poses = np.concatenate(all_poses, 0)
-    
+
     H, W = imgs[0].shape[:2]
-    camera_angle_x = float(meta['camera_angle_x'])
+    camera_angle_x = float(metas['train']['camera_angle_x'])
     focal = .5 * W / np.tan(.5 * camera_angle_x)
     
     render_poses = torch.stack([pose_spherical(angle, -30.0, 4.0) for angle in np.linspace(-180,180,40+1)[:-1]], 0)

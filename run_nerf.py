@@ -191,14 +191,14 @@ def create_nerf(args):
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
-    model = NeRF(D=args.netdepth, w=args.netwidth,
+    model = NeRF(depth=args.netdepth, w=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
     grad_vars = list(model.parameters())
 
     model_fine = None
     if args.N_importance > 0:
-        model_fine = NeRF(D=args.netdepth_fine, w=args.netwidth_fine,
+        model_fine = NeRF(depth=args.netdepth_fine, w=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
                           input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
         grad_vars += list(model_fine.parameters())
@@ -242,9 +242,9 @@ def create_nerf(args):
     render_kwargs_train = {
         'network_query_fn' : network_query_fn,
         'perturb' : args.perturb,
-        'N_importance' : args.N_importance,
+        'n_importance' : args.N_importance,
         'network_fine' : model_fine,
-        'N_samples' : args.N_samples,
+        'n_samples' : args.N_samples,
         'network_fn' : model,
         'use_viewdirs' : args.use_viewdirs,
         'white_bkgd' : args.white_bkgd,
