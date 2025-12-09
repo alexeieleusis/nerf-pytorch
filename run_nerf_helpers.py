@@ -344,7 +344,7 @@ def sample_pdf(bins, weights, n_samples, det=False, pytest=False):
             u = np.broadcast_to(u, new_shape)
         else:
             u = rng.random(new_shape)
-        u = torch.Tensor(u)
+        u = torch.tensor(u, dtype=torch.float32)
 
     # Invert CDF using binary search
     # For each uniform sample u, find where it falls in the CDF

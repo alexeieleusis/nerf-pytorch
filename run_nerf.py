@@ -818,11 +818,11 @@ def get_ray_batch(use_batching, i, i_batch, rays_rgb, n_rand, i_train, images, p
         rng = np.random.default_rng(0)
         img_i = rng.choice(i_train)
         target = images[img_i]
-        target = torch.Tensor(target).to(device)
+        target = torch.tensor(target).to(device)
         pose = poses[img_i, :3,:4]
 
         if n_rand is not None:
-            rays_o, rays_d = get_rays(height, width, intrinsics, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
+            rays_o, rays_d = get_rays(height, width, intrinsics, torch.tensor(pose))  # (H, W, 3), (H, W, 3)
 
             if i < args.precrop_iters:
                 d_h = int(height//2 * args.precrop_frac)
@@ -917,7 +917,7 @@ def save_testset_renders(i, poses, i_test, hwf, k, args, render_kwargs_test, bas
     os.makedirs(testsavedir, exist_ok=True)
     print('test poses shape', poses[i_test].shape)
     with torch.no_grad():
-        render_path(torch.Tensor(poses[i_test]).to(device), hwf, k, args.chunk, render_kwargs_test, savedir=testsavedir)
+        render_path(torch.tensor(poses[i_test]).to(device), hwf, k, args.chunk, render_kwargs_test, savedir=testsavedir)
     print('Saved test set')
 
 
@@ -1060,7 +1060,7 @@ def train():
     render_kwargs_test.update(bds_dict)
 
     # Move testing data to GPU
-    render_poses = torch.Tensor(render_poses).to(device)
+    render_poses = torch.tensor(render_poses).to(device)
 
     # Short circuit if only rendering out from trained model
     if args.render_only:
@@ -1073,10 +1073,10 @@ def train():
 
     # Move training data to GPU
     if use_batching:
-        images = torch.Tensor(images).to(device)
-    poses = torch.Tensor(poses).to(device)
+        images = torch.tensor(images).to(device)
+    poses = torch.tensor(poses).to(device)
     if use_batching:
-        rays_rgb = torch.Tensor(rays_rgb).to(device)
+        rays_rgb = torch.tensor(rays_rgb).to(device)
 
     # Run training loop
     n_iters = 200000 + 1
