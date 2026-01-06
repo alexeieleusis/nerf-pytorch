@@ -1,0 +1,52 @@
+site_name: nerf-pytorch
+repo_url: https://github.com/yenchenlin/nerf-pytorch
+site_url: https://yenchenlin.github.io/nerf-pytorch
+site_description: A PyTorch implementation of NeRF (Neural Radiance Fields) that reproduces the results.
+site_author: Yen-Chen Lin
+edit_uri: edit/main/docs/
+repo_name: yenchenlin/nerf-pytorch
+copyright: Maintained by <a href="https://yenchenlin.com">yenchenlin</a>.
+
+nav:
+  - Home: index.md
+  - Modules: modules.md
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["nerf_pytorch"]
+theme:
+  name: material
+  feature:
+    tabs: true
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/yenchenlin/nerf-pytorch
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/nerf-pytorch
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
