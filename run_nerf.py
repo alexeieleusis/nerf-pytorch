@@ -306,7 +306,9 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     # Compute distances between adjacent samples
     dists = z_vals[..., 1:] - z_vals[..., :-1]
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[..., :1].shape)], -1)  # [N_rays, N_samples]
+    dists = torch.cat(
+        [dists, torch.tensor([1e10], device=dists.device).expand(dists[..., :1].shape)], -1
+    )  # [N_rays, N_samples]
     # Last distance is set to infinity to handle ray endpoints
 
     # Scale distances by ray direction norm to get actual Euclidean distances
@@ -318,13 +320,13 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     # Optional: Add noise to density predictions during training for regularization
     noise = 0.0
     if raw_noise_std > 0.0:
-        noise = torch.randn(raw[..., 3].shape) * raw_noise_std
+        noise = torch.randn(raw[..., 3].shape, device=raw.device) * raw_noise_std
 
         # Overwrite randomly sampled data if pytest
         if pytest:
             np.random.seed(0)
             noise = np.random.rand(*list(raw[..., 3].shape)) * raw_noise_std
-            noise = torch.Tensor(noise)
+            noise = torch.tensor(noise, device=raw.device)
 
     # Compute alpha (opacity) from density
     alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
@@ -332,7 +334,12 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     # Compute transmittance T(t) = exp(-∫₀ᵗ σ(s)ds)
     # Using the cumulative product: T_i = ∏ⱼ₌₁ⁱ⁻¹ (1 - αⱼ)
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.0 - alpha + 1e-10], -1), -1)[:, :-1]
+    weights = (
+        alpha
+        * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=alpha.device), 1.0 - alpha + 1e-10], -1), -1)[
+            :, :-1
+        ]
+    )
     # weights[i] = T_i · α_i represents the probability that ray terminates at sample i
 
     # Compute expected color using quadrature: C = Σ wᵢ·cᵢ
@@ -423,7 +430,7 @@ def render_rays(
 
     # Create stratified samples along the ray
     # Divide [near, far] into N_samples bins and sample within each bin
-    t_vals = torch.linspace(0.0, 1.0, steps=N_samples)
+    t_vals = torch.linspace(0.0, 1.0, steps=N_samples, device=rays_o.device)
     if not lindisp:
         # Sample linearly in depth: z = near + t*(far - near)
         z_vals = near * (1.0 - t_vals) + far * (t_vals)
@@ -442,13 +449,13 @@ def render_rays(
         upper = torch.cat([mids, z_vals[..., -1:]], -1)
         lower = torch.cat([z_vals[..., :1], mids], -1)
         # stratified samples in those intervals: sample uniformly within each bin
-        t_rand = torch.rand(z_vals.shape)
+        t_rand = torch.rand(z_vals.shape, device=z_vals.device)
 
         # Pytest, overwrite u with numpy's fixed random numbers
         if pytest:
             np.random.seed(0)
             t_rand = np.random.rand(*list(z_vals.shape))
-            t_rand = torch.Tensor(t_rand)
+            t_rand = torch.tensor(t_rand, device=z_vals.device)
 
         z_vals = lower + (upper - lower) * t_rand
 
@@ -835,15 +842,15 @@ def train():
             pose = poses[img_i, :3, :4]
 
             if N_rand is not None:
-                rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
+                rays_o, rays_d = get_rays(H, W, K, torch.tensor(pose, device=device))  # (H, W, 3), (H, W, 3)
 
                 if i < args.precrop_iters:
                     dH = int(H // 2 * args.precrop_frac)
                     dW = int(W // 2 * args.precrop_frac)
                     coords = torch.stack(
                         torch.meshgrid(
-                            torch.linspace(H // 2 - dH, H // 2 + dH - 1, 2 * dH),
-                            torch.linspace(W // 2 - dW, W // 2 + dW - 1, 2 * dW),
+                            torch.linspace(H // 2 - dH, H // 2 + dH - 1, 2 * dH, device=device),
+                            torch.linspace(W // 2 - dW, W // 2 + dW - 1, 2 * dW, device=device),
                         ),
                         -1,
                     )
@@ -853,7 +860,10 @@ def train():
                         )
                 else:
                     coords = torch.stack(
-                        torch.meshgrid(torch.linspace(0, H - 1, H), torch.linspace(0, W - 1, W)), -1
+                        torch.meshgrid(
+                            torch.linspace(0, H - 1, H, device=device), torch.linspace(0, W - 1, W, device=device)
+                        ),
+                        -1,
                     )  # (H, W, 2)
 
                 coords = torch.reshape(coords, [-1, 2])  # (H * W, 2)
@@ -999,6 +1009,7 @@ def train():
 
 
 if __name__ == "__main__":
-    torch.set_default_tensor_type("torch.cuda.FloatTensor")
+    torch.set_default_dtype(torch.float32)
+    torch.set_default_device("cuda")
 
     train()

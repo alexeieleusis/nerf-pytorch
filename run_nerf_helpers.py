@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 # Misc
 img2mse = lambda x, y: torch.mean((x - y) ** 2)
-mse2psnr = lambda x: -10.0 * torch.log(x) / torch.log(torch.Tensor([10.0]))
+mse2psnr = lambda x: -10.0 * torch.log(x) / torch.log(torch.tensor([10.0], device=x.device))
 to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
 
 
@@ -38,6 +38,7 @@ class Embedder:
 
         # Create frequency bands: 2^0, 2^1, 2^2, ..., 2^(L-1)
         # Log sampling means we sample frequencies logarithmically
+        # Note: freq_bands are created on CPU, but will be moved to correct device during embed
         if self.kwargs["log_sampling"]:
             freq_bands = 2.0 ** torch.linspace(0.0, max_freq, steps=N_freqs)
         else:
@@ -45,9 +46,10 @@ class Embedder:
 
         # For each frequency band, apply both sin and cos
         # This creates: [sin(2^0*x), cos(2^0*x), sin(2^1*x), cos(2^1*x), ...]
+        # We convert freq to float to avoid device issues (scalars work on any device)
         for freq in freq_bands:
             for p_fn in self.kwargs["periodic_fns"]:  # [sin, cos]
-                embed_fns.append(lambda x, p_fn=p_fn, freq=freq: p_fn(x * freq))
+                embed_fns.append(lambda x, p_fn=p_fn, freq=freq.item(): p_fn(x * freq))
                 out_dim += d  # Each periodic function adds d dimensions
 
         self.embed_fns = embed_fns
@@ -246,8 +248,10 @@ def get_rays(H, W, K, c2w):
         rays_d: [H, W, 3] Ray directions in world coordinates
     """
     # Create pixel coordinate grid
+    # Determine device from c2w matrix
+    device = c2w.device if isinstance(c2w, torch.Tensor) else torch.device("cpu")
     i, j = torch.meshgrid(
-        torch.linspace(0, W - 1, W), torch.linspace(0, H - 1, H)
+        torch.linspace(0, W - 1, W, device=device), torch.linspace(0, H - 1, H, device=device)
     )  # pytorch's meshgrid has indexing='ij'
     i = i.t()  # Transpose to get correct [H, W] shape
     j = j.t()
@@ -335,11 +339,11 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     # Take uniform samples in [0, 1]
     if det:
         # Deterministic: evenly spaced samples
-        u = torch.linspace(0.0, 1.0, steps=N_samples)
+        u = torch.linspace(0.0, 1.0, steps=N_samples, device=cdf.device)
         u = u.expand(list(cdf.shape[:-1]) + [N_samples])
     else:
         # Stochastic: random samples
-        u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
+        u = torch.rand(list(cdf.shape[:-1]) + [N_samples], device=cdf.device)
 
     # Pytest, overwrite u with numpy's fixed random numbers
     if pytest:
@@ -350,7 +354,7 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
             u = np.broadcast_to(u, new_shape)
         else:
             u = np.random.rand(*new_shape)
-        u = torch.Tensor(u)
+        u = torch.tensor(u, device=cdf.device)
 
     # Invert CDF using binary search
     # For each uniform sample u, find where it falls in the CDF
