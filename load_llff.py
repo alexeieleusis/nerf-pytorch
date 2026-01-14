@@ -7,7 +7,11 @@ import numpy as np
 ##########  see https://github.com/Fyusion/LLFF for original
 
 
-def _minify(basedir, factors=[], resolutions=[]):
+def _minify(basedir, factors=None, resolutions=None):
+    if factors is None:
+        factors = []
+    if resolutions is None:
+        resolutions = []
     needtoload = False
     for r in factors:
         imgdir = os.path.join(basedir, f"images_{r}")
@@ -20,11 +24,13 @@ def _minify(basedir, factors=[], resolutions=[]):
     if not needtoload:
         return
 
+    import glob
+    import shutil
     from subprocess import check_output
 
     imgdir = os.path.join(basedir, "images")
     imgs = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir))]
-    imgs = [f for f in imgs if any([f.endswith(ex) for ex in ["JPG", "jpg", "png", "jpeg", "PNG"]])]
+    imgs = [f for f in imgs if any(f.endswith(ex) for ex in ["JPG", "jpg", "png", "jpeg", "PNG"])]
     imgdir_orig = imgdir
 
     wd = os.getcwd()
@@ -43,17 +49,19 @@ def _minify(basedir, factors=[], resolutions=[]):
         print("Minifying", r, basedir)
 
         os.makedirs(imgdir)
-        check_output(f"cp {imgdir_orig}/* {imgdir}", shell=True)
+        for f in glob.glob(os.path.join(imgdir_orig, "*")):
+            shutil.copy2(f, imgdir)
 
         ext = imgs[0].split(".")[-1]
-        args = " ".join(["mogrify", "-resize", resizearg, "-format", "png", f"*.{ext}"])
-        print(args)
+        args = ["mogrify", "-resize", resizearg, "-format", "png", f"*.{ext}"]
+        print(" ".join(args))
         os.chdir(imgdir)
-        check_output(args, shell=True)
+        check_output(args)
         os.chdir(wd)
 
         if ext != "png":
-            check_output(f"rm {imgdir}/*.{ext}", shell=True)
+            for f in glob.glob(os.path.join(imgdir, f"*.{ext}")):
+                os.remove(f)
             print("Removed duplicates")
         print("Done")
 
@@ -64,11 +72,11 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
     bds = poses_arr[:, -2:].transpose([1, 0])
 
-    img0 = [
+    img0 = next(
         os.path.join(basedir, "images", f)
         for f in sorted(os.listdir(os.path.join(basedir, "images")))
         if f.endswith("JPG") or f.endswith("jpg") or f.endswith("png")
-    ][0]
+    )
     sh = imageio.imread(img0).shape
 
     sfx = ""
@@ -153,7 +161,7 @@ def poses_avg(poses):
 
 def render_path_spiral(c2w, up, rads, focal, zdelta, zrate, rots, N):
     render_poses = []
-    rads = np.array(list(rads) + [1.0])
+    rads = np.array([*list(rads), 1.0])
     hwf = c2w[:, 4:5]
 
     for theta in np.linspace(0.0, 2.0 * np.pi * rots, N + 1)[:-1]:
@@ -280,7 +288,6 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=0.75, spherify=Fa
         focal = mean_dz
 
         # Get radii for spiral path
-        shrink_factor = 0.8
         zdelta = close_depth * 0.2
         tt = poses[:, :3, 3]  # ptstocam(poses[:3,3,:].T, c2w).T
         rads = np.percentile(np.abs(tt), 90, 0)

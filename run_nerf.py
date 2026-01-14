@@ -41,7 +41,7 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
     outputs_flat = batchify(fn, netchunk)(embedded)
-    outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
+    outputs = torch.reshape(outputs_flat, [*list(inputs.shape[:-1]), outputs_flat.shape[-1]])
     return outputs
 
 
@@ -60,9 +60,9 @@ def batchify_rays(rays_flat, chunk=1024 * 32, **kwargs):
 
 
 def render(
-    H,
-    W,
-    K,
+    height,
+    width,
+    focal,
     chunk=1024 * 32,
     rays=None,
     c2w=None,
@@ -97,7 +97,7 @@ def render(
     """
     if c2w is not None:
         # special case to render full image
-        rays_o, rays_d = get_rays(H, W, K, c2w)
+        rays_o, rays_d = get_rays(height, width, focal, c2w)
     else:
         # use provided ray batch
         rays_o, rays_d = rays
@@ -107,14 +107,14 @@ def render(
         viewdirs = rays_d
         if c2w_staticcam is not None:
             # special case to visualize effect of viewdirs
-            rays_o, rays_d = get_rays(H, W, K, c2w_staticcam)
+            rays_o, rays_d = get_rays(height, width, focal, c2w_staticcam)
         viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
         viewdirs = torch.reshape(viewdirs, [-1, 3]).float()
 
     sh = rays_d.shape  # [..., 3]
     if ndc:
         # for forward facing scenes
-        rays_o, rays_d = ndc_rays(H, W, K[0][0], 1.0, rays_o, rays_d)
+        rays_o, rays_d = ndc_rays(height, width, focal[0][0], 1.0, rays_o, rays_d)
 
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1, 3]).float()
@@ -128,16 +128,16 @@ def render(
     # Render and reshape
     all_ret = batchify_rays(rays, chunk, **kwargs)
     for k in all_ret:
-        k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
+        k_sh = [*list(sh[:-1]), *list(all_ret[k].shape[1:])]
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
 
     k_extract = ["rgb_map", "disp_map", "acc_map"]
     ret_list = [all_ret[k] for k in k_extract]
     ret_dict = {k: all_ret[k] for k in all_ret if k not in k_extract}
-    return ret_list + [ret_dict]
+    return [*ret_list, ret_dict]
 
 
-def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(render_poses, hwf, k, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
 
@@ -154,17 +154,11 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs)
+        rgb, disp, _acc, _ = render(H, W, k, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i == 0:
             print(rgb.shape, disp.shape)
-
-        """
-        if gt_imgs is not None and render_factor==0:
-            p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
-            print(p)
-        """
 
         if savedir is not None:
             rgb8 = to8b(rgbs[-1])
@@ -216,7 +210,7 @@ def create_nerf(args):
     )
 
     # Create optimizer
-    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999), weight_decay=0)
 
     start = 0
     basedir = args.basedir
@@ -278,19 +272,19 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     Transforms model's predictions to semantically meaningful values using volume rendering.
 
     This implements the classical volume rendering integral described in Section 4:
-    C(r) = ∫ T(t) · σ(t) · c(t) dt
+    C(r) = ∫ T(t) · sigma(t) · c(t) dt
 
     where:
     - C(r) is the expected color along ray r
-    - T(t) = exp(-∫₀ᵗ σ(s)ds) is the transmittance (probability ray travels to t without hitting anything)
-    - σ(t) is the volume density at point t
+    - T(t) = exp(-∫₀ᵗ sigma(s)ds) is the transmittance (probability ray travels to t without hitting anything)
+    - sigma(t) is the volume density at point t
     - c(t) is the RGB color at point t
 
     The continuous integral is approximated using quadrature (numerical integration)
     with stratified sampling along the ray.
 
     Args:
-        raw: [num_rays, num_samples along ray, 4]. Prediction from model (RGB + σ).
+        raw: [num_rays, num_samples along ray, 4]. Prediction from model (RGB + sigma).
         z_vals: [num_rays, num_samples along ray]. Sample distances along each ray.
         rays_d: [num_rays, 3]. Direction of each ray.
     Returns:
@@ -301,7 +295,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         depth_map: [num_rays]. Expected distance to surface.
     """
     # Function to convert raw density to alpha (opacity) using exponential
-    # Formula: α = 1 - exp(-σ·δ), where δ is the distance between samples
+    # Formula: alpha = 1 - exp(-sigma·delta), where delta is the distance between samples
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.0 - torch.exp(-act_fn(raw) * dists)
 
     # Compute distances between adjacent samples
@@ -325,14 +319,14 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         # Overwrite randomly sampled data if pytest
         if pytest:
             np.random.seed(0)
-            noise = np.random.rand(*list(raw[..., 3].shape)) * raw_noise_std
+            noise = np.random.rand(*raw[..., 3].shape) * raw_noise_std
             noise = torch.tensor(noise, device=raw.device)
 
     # Compute alpha (opacity) from density
     alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
 
-    # Compute transmittance T(t) = exp(-∫₀ᵗ σ(s)ds)
-    # Using the cumulative product: T_i = ∏ⱼ₌₁ⁱ⁻¹ (1 - αⱼ)
+    # Compute transmittance T(t) = exp(-∫₀ᵗ sigma(s)ds)
+    # Using the cumulative product: T_i = ∏ⱼ₌₁ⁱ⁻¹ (1 - alpha_j)
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = (
         alpha
@@ -340,7 +334,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             :, :-1
         ]
     )
-    # weights[i] = T_i · α_i represents the probability that ray terminates at sample i
+    # weights[i] = T_i · alpha_i represents the probability that ray terminates at sample i
 
     # Compute expected color using quadrature: C = Σ wᵢ·cᵢ
     rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
@@ -454,7 +448,7 @@ def render_rays(
         # Pytest, overwrite u with numpy's fixed random numbers
         if pytest:
             np.random.seed(0)
-            t_rand = np.random.rand(*list(z_vals.shape))
+            t_rand = np.random.rand(*z_vals.shape)
             t_rand = torch.tensor(t_rand, device=z_vals.device)
 
         z_vals = lower + (upper - lower) * t_rand
@@ -466,7 +460,7 @@ def render_rays(
     #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
     # Render using volume rendering to get RGB, disparity, opacity, etc.
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
+    rgb_map, disp_map, acc_map, weights, _depth_map = raw2outputs(
         raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest
     )
 
@@ -481,7 +475,7 @@ def render_rays(
         z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])  # Midpoints of coarse bins
         # Use inverse transform sampling to draw N_importance samples from the PDF
         # defined by the coarse network weights (which encode density)
-        z_samples = sample_pdf(z_vals_mid, weights[..., 1:-1], N_importance, det=(perturb == 0.0), pytest=pytest)
+        z_samples = sample_pdf(z_vals_mid, weights[..., 1:-1], N_importance, det=(perturb < 1e-10), pytest=pytest)
         z_samples = z_samples.detach()  # Don't backprop through sampling
 
         # Combine coarse and fine samples, then sort along each ray
@@ -493,11 +487,10 @@ def render_rays(
 
         # Query the fine network (or coarse if fine doesn't exist)
         run_fn = network_fn if network_fine is None else network_fine
-        #         raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
         # Render with the fine network's predictions (these are the final outputs)
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
+        rgb_map, disp_map, acc_map, weights, _depth_map = raw2outputs(
             raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest
         )
 
@@ -676,10 +669,7 @@ def train():
         near = 2.0
         far = 6.0
 
-        if args.white_bkgd:
-            images = images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])
-        else:
-            images = images[..., :3]
+        images = (images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])) if args.white_bkgd else images[..., :3]
 
     elif args.dataset_type == "LINEMOD":
         images, poses, render_poses, hwf, K, i_split, near, far = load_LINEMOD_data(
@@ -689,10 +679,7 @@ def train():
         print(f"[CHECK HERE] near: {near}, far: {far}.")
         i_train, i_val, i_test = i_split
 
-        if args.white_bkgd:
-            images = images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])
-        else:
-            images = images[..., :3]
+        images = images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:]) if args.white_bkgd else images[..., :3]
 
     elif args.dataset_type == "deepvoxels":
         images, poses, render_poses, hwf, i_split = load_dv_data(
@@ -732,11 +719,11 @@ def train():
             file.write(f"{arg} = {attr}\n")
     if args.config is not None:
         f = os.path.join(basedir, expname, "config.txt")
-        with open(f, "w") as file:
-            file.write(open(args.config).read())
+        with open(f, "w") as file, open(args.config) as config_file:
+            file.write(config_file.read())
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    render_kwargs_train, render_kwargs_test, start, _grad_vars, optimizer = create_nerf(args)
     global_step = start
 
     bds_dict = {
@@ -753,12 +740,8 @@ def train():
     if args.render_only:
         print("RENDER ONLY")
         with torch.no_grad():
-            if args.render_test:
-                # render_test switches to test poses
-                images = images[i_test]
-            else:
-                # Default is smoother render_poses path
-                images = None
+            # render_test switches to test poses; otherwise use smoother render_poses path
+            images = images[i_test] if args.render_test else None
 
             testsavedir = os.path.join(
                 basedir, expname, "renderonly_{}_{:06d}".format("test" if args.render_test else "path", start)
@@ -818,7 +801,7 @@ def train():
 
     start = start + 1
     for i in trange(start, N_iters):
-        time0 = time.time()
+        _time0 = time.time()
 
         # Sample random ray batch
         if use_batching:
@@ -876,7 +859,7 @@ def train():
 
         #####  Core optimization loop  #####
         # Render the batch of rays using both coarse and fine networks
-        rgb, disp, acc, extras = render(
+        rgb, _disp, _acc, extras = render(
             H, W, K, chunk=args.chunk, rays=batch_rays, verbose=i < 10, retraw=True, **render_kwargs_train
         )
 
@@ -885,7 +868,7 @@ def train():
         # Compute loss: Mean Squared Error between rendered RGB and ground truth
         # This is the photometric loss described in the paper
         img_loss = img2mse(rgb, target_s)
-        trans = extras["raw"][..., -1]
+        _trans = extras["raw"][..., -1]
         loss = img_loss
         psnr = mse2psnr(img_loss)  # Peak Signal-to-Noise Ratio for logging
 
@@ -894,7 +877,7 @@ def train():
         if "rgb0" in extras:
             img_loss0 = img2mse(extras["rgb0"], target_s)
             loss = loss + img_loss0  # Total loss = fine_loss + coarse_loss
-            psnr0 = mse2psnr(img_loss0)
+            _psnr0 = mse2psnr(img_loss0)
 
         # Backpropagation and optimization step
         loss.backward()
@@ -911,7 +894,7 @@ def train():
             param_group["lr"] = new_lrate
         ################################
 
-        dt = time.time() - time0
+        # dt = time.time() - time0
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
         #####           end            #####
 

@@ -81,10 +81,7 @@ def load_blender_data(basedir, half_res=False, testskip=1):
         meta = metas[s]
         imgs = []
         poses = []
-        if s == "train" or testskip == 0:
-            skip = 1
-        else:
-            skip = testskip
+        skip = 1 if s == "train" or testskip == 0 else testskip
 
         for frame in meta["frames"][::skip]:
             fname = os.path.join(basedir, frame["file_path"] + ".png")

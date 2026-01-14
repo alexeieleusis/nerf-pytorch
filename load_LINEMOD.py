@@ -45,10 +45,7 @@ def load_LINEMOD_data(basedir, half_res=False, testskip=1):
         meta = metas[s]
         imgs = []
         poses = []
-        if s == "train" or testskip == 0:
-            skip = 1
-        else:
-            skip = testskip
+        skip = 1 if s == "train" or testskip == 0 else testskip
 
         for idx_test, frame in enumerate(meta["frames"][::skip]):
             fname = frame["file_path"]

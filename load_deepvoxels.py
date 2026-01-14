@@ -32,10 +32,7 @@ def load_dv_data(scene="cube", basedir="/data/deepvoxels", testskip=8):
         f = trgt_sidelength / height * f
 
         fx = f
-        if invert_y:
-            fy = -f
-        else:
-            fy = f
+        fy = -f if invert_y else f
 
         # Build the intrinsic matrices
         full_intrinsic = np.array([[fx, 0.0, cx, 0.0], [0.0, fy, cy, 0], [0.0, 0, 1, 0], [0, 0, 0, 1]])
@@ -43,8 +40,11 @@ def load_dv_data(scene="cube", basedir="/data/deepvoxels", testskip=8):
         return full_intrinsic, grid_barycenter, scale, near_plane, world2cam_poses
 
     def load_pose(filename):
-        assert os.path.isfile(filename)
-        nums = open(filename).read().split()
+        if not os.path.isfile(filename):
+            msg = f"Pose file not found: {filename}"
+            raise FileNotFoundError(msg)
+        with open(filename) as f:
+            nums = f.read().split()
         return np.array([float(x) for x in nums]).reshape([4, 4]).astype(np.float32)
 
     H = 512

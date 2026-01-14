@@ -12,11 +12,11 @@ to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
 
 
 # Positional encoding (section 5.1)
-# This implements the γ(p) function from the paper, which maps continuous input coordinates
+# This implements the gamma(p) function from the paper, which maps continuous input coordinates
 # to a higher dimensional space using high frequency functions. This helps the network learn
 # high-frequency variations in color and geometry.
 #
-# The encoding is: γ(p) = (sin(2^0πp), cos(2^0πp), sin(2^1πp), cos(2^1πp), ..., sin(2^(L-1)πp), cos(2^(L-1)πp))
+# The encoding is: gamma(p) = (sin(2^0πp), cos(2^0πp), sin(2^1πp), cos(2^1πp), ..., sin(2^(L-1)πp), cos(2^(L-1)πp))
 # where L is the number of frequency bands (multires hyperparameter)
 class Embedder:
     def __init__(self, **kwargs):
@@ -48,8 +48,9 @@ class Embedder:
         # This creates: [sin(2^0*x), cos(2^0*x), sin(2^1*x), cos(2^1*x), ...]
         # We convert freq to float to avoid device issues (scalars work on any device)
         for freq in freq_bands:
+            freq_val = freq.item()
             for p_fn in self.kwargs["periodic_fns"]:  # [sin, cos]
-                embed_fns.append(lambda x, p_fn=p_fn, freq=freq.item(): p_fn(x * freq))
+                embed_fns.append(lambda x, p_fn=p_fn, freq=freq_val: p_fn(x * freq))
                 out_dim += d  # Each periodic function adds d dimensions
 
         self.embed_fns = embed_fns
@@ -98,19 +99,19 @@ class NeRF(nn.Module):
     """
     Neural Radiance Field (NeRF) MLP architecture.
 
-    This implements the network F_Θ described in Section 3 of the paper.
-    The network takes as input a 5D coordinate (position x,y,z and viewing direction θ,φ)
-    and outputs volume density σ and RGB color c.
+    This implements the network F_Theta described in Section 3 of the paper.
+    The network takes as input a 5D coordinate (position x,y,z and viewing direction theta,phi)
+    and outputs volume density sigma and RGB color c.
 
     Architecture details from paper (Section 3, Figure 3):
     - 8 fully-connected layers (D=8), 256 channels per layer (W=256)
     - Skip connection at layer 5 (concatenates input with intermediate features)
-    - Position encoding applied separately to (x,y,z) and (θ,φ)
-    - Density σ depends only on position (x,y,z)
+    - Position encoding applied separately to (x,y,z) and (theta,phi)
+    - Density sigma depends only on position (x,y,z)
     - RGB color c depends on both position and viewing direction
     """
 
-    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=None, use_viewdirs=False):
         """
         Args:
             D: Number of layers in the main MLP
@@ -121,12 +122,12 @@ class NeRF(nn.Module):
             skips: Layers at which to add skip connections (typically [4] for layer 5)
             use_viewdirs: Whether to use viewing direction as input (enables view-dependent effects)
         """
-        super(NeRF, self).__init__()
+        super().__init__()
         self.D = D
         self.W = W
         self.input_ch = input_ch
         self.input_ch_views = input_ch_views
-        self.skips = skips
+        self.skips = skips if skips is not None else [4]
         self.use_viewdirs = use_viewdirs
 
         # Main MLP for processing position
@@ -146,10 +147,10 @@ class NeRF(nn.Module):
 
         if use_viewdirs:
             # When using viewing directions, split the network:
-            # - alpha (density σ) depends only on position
+            # - alpha (density sigma) depends only on position
             # - rgb (color c) depends on position and viewing direction
             self.feature_linear = nn.Linear(W, W)
-            self.alpha_linear = nn.Linear(W, 1)  # Outputs volume density σ
+            self.alpha_linear = nn.Linear(W, 1)  # Outputs volume density sigma
             self.rgb_linear = nn.Linear(W // 2, 3)  # Outputs RGB color c
         else:
             # Simple case: directly output RGB+density from position
@@ -162,7 +163,7 @@ class NeRF(nn.Module):
         Input format: concatenated [positionally_encoded_position, positionally_encoded_viewing_direction]
 
         Returns:
-            outputs: [batch, 4] tensor containing [R, G, B, σ] where σ is volume density
+            outputs: [batch, 4] tensor containing [R, G, B, sigma] where sigma is volume density
         """
         # Split input into position and viewing direction components
         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
@@ -170,7 +171,7 @@ class NeRF(nn.Module):
 
         # Process through main MLP layers with skip connections
         # Skip connections help the network learn high-frequency details
-        for i, l in enumerate(self.pts_linears):
+        for i in range(len(self.pts_linears)):
             h = self.pts_linears[i](h)
             h = F.relu(h)
             if i in self.skips:
@@ -180,17 +181,17 @@ class NeRF(nn.Module):
         if self.use_viewdirs:
             # Separate path for density (view-independent) and color (view-dependent)
             # This is key to modeling view-dependent effects like specularities
-            alpha = self.alpha_linear(h)  # Volume density σ (view-independent)
+            alpha = self.alpha_linear(h)  # Volume density sigma (view-independent)
             feature = self.feature_linear(h)
             h = torch.cat([feature, input_views], -1)  # Concatenate viewing direction
 
             # Process through view-dependent layers
-            for i, l in enumerate(self.views_linears):
+            for i in range(len(self.views_linears)):
                 h = self.views_linears[i](h)
                 h = F.relu(h)
 
             rgb = self.rgb_linear(h)  # RGB color c (view-dependent)
-            outputs = torch.cat([rgb, alpha], -1)  # [R, G, B, σ]
+            outputs = torch.cat([rgb, alpha], -1)  # [R, G, B, sigma]
         else:
             # Simple case: both RGB and density from position only
             outputs = self.output_linear(h)
@@ -198,7 +199,8 @@ class NeRF(nn.Module):
         return outputs
 
     def load_weights_from_keras(self, weights):
-        assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
+        if not self.use_viewdirs:
+            raise NotImplementedError("load_weights_from_keras is not implemented if use_viewdirs=False")
 
         # Load pts_linears
         for i in range(self.D):
@@ -340,15 +342,15 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     if det:
         # Deterministic: evenly spaced samples
         u = torch.linspace(0.0, 1.0, steps=N_samples, device=cdf.device)
-        u = u.expand(list(cdf.shape[:-1]) + [N_samples])
+        u = u.expand([*list(cdf.shape[:-1]), N_samples])
     else:
         # Stochastic: random samples
-        u = torch.rand(list(cdf.shape[:-1]) + [N_samples], device=cdf.device)
+        u = torch.rand([*list(cdf.shape[:-1]), N_samples], device=cdf.device)
 
     # Pytest, overwrite u with numpy's fixed random numbers
     if pytest:
         np.random.seed(0)
-        new_shape = list(cdf.shape[:-1]) + [N_samples]
+        new_shape = [*list(cdf.shape[:-1]), N_samples]
         if det:
             u = np.linspace(0.0, 1.0, N_samples)
             u = np.broadcast_to(u, new_shape)
