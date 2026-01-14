@@ -34,15 +34,15 @@ class Embedder:
             out_dim += d
 
         max_freq = self.kwargs["max_freq_log2"]  # L-1, where L is number of frequency bands
-        N_freqs = self.kwargs["num_freqs"]  # L, number of frequency bands
+        n_freqs = self.kwargs["num_freqs"]  # L, number of frequency bands
 
         # Create frequency bands: 2^0, 2^1, 2^2, ..., 2^(L-1)
         # Log sampling means we sample frequencies logarithmically
         # Note: freq_bands are created on CPU, but will be moved to correct device during embed
         if self.kwargs["log_sampling"]:
-            freq_bands = 2.0 ** torch.linspace(0.0, max_freq, steps=N_freqs)
+            freq_bands = 2.0 ** torch.linspace(0.0, max_freq, steps=n_freqs)
         else:
-            freq_bands = torch.linspace(2.0**0.0, 2.0**max_freq, steps=N_freqs)
+            freq_bands = torch.linspace(2.0**0.0, 2.0**max_freq, steps=n_freqs)
 
         # For each frequency band, apply both sin and cos
         # This creates: [sin(2^0*x), cos(2^0*x), sin(2^1*x), cos(2^1*x), ...]
@@ -111,7 +111,7 @@ class NeRF(nn.Module):
     - RGB color c depends on both position and viewing direction
     """
 
-    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=None, use_viewdirs=False):
+    def __init__(self, depth=8, width=256, input_ch=3, input_ch_views=3, output_ch=4, skips=None, use_viewdirs=False):
         """
         Args:
             D: Number of layers in the main MLP
@@ -123,8 +123,8 @@ class NeRF(nn.Module):
             use_viewdirs: Whether to use viewing direction as input (enables view-dependent effects)
         """
         super().__init__()
-        self.D = D
-        self.W = W
+        self.D = depth
+        self.W = width
         self.input_ch = input_ch
         self.input_ch_views = input_ch_views
         self.skips = skips if skips is not None else [4]
@@ -133,13 +133,16 @@ class NeRF(nn.Module):
         # Main MLP for processing position
         # Consists of D layers with skip connections at specified layers
         self.pts_linears = nn.ModuleList(
-            [nn.Linear(input_ch, W)]
-            + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D - 1)]
+            [nn.Linear(input_ch, width)]
+            + [
+                nn.Linear(width, width) if i not in self.skips else nn.Linear(width + input_ch, width)
+                for i in range(depth - 1)
+            ]
         )
 
         ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
         # Additional MLP for processing viewing direction (single layer in official implementation)
-        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W // 2)])
+        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + width, width // 2)])
 
         ### Implementation according to the paper
         # self.views_linears = nn.ModuleList(
@@ -149,12 +152,12 @@ class NeRF(nn.Module):
             # When using viewing directions, split the network:
             # - alpha (density sigma) depends only on position
             # - rgb (color c) depends on position and viewing direction
-            self.feature_linear = nn.Linear(W, W)
-            self.alpha_linear = nn.Linear(W, 1)  # Outputs volume density sigma
-            self.rgb_linear = nn.Linear(W // 2, 3)  # Outputs RGB color c
+            self.feature_linear = nn.Linear(width, width)
+            self.alpha_linear = nn.Linear(width, 1)  # Outputs volume density sigma
+            self.rgb_linear = nn.Linear(width // 2, 3)  # Outputs RGB color c
         else:
             # Simple case: directly output RGB+density from position
-            self.output_linear = nn.Linear(W, output_ch)
+            self.output_linear = nn.Linear(width, output_ch)
 
     def forward(self, x):
         """
@@ -230,7 +233,7 @@ class NeRF(nn.Module):
 
 
 # Ray helpers
-def get_rays(H, W, K, c2w):
+def get_rays(image_height, image_width, focal, c2w):
     """
     Generate ray origins and directions for all pixels in an image.
 
@@ -253,7 +256,8 @@ def get_rays(H, W, K, c2w):
     # Determine device from c2w matrix
     device = c2w.device if isinstance(c2w, torch.Tensor) else torch.device("cpu")
     i, j = torch.meshgrid(
-        torch.linspace(0, W - 1, W, device=device), torch.linspace(0, H - 1, H, device=device)
+        torch.linspace(0, image_width - 1, image_width, device=device),
+        torch.linspace(0, image_height - 1, image_height, device=device),
     )  # pytorch's meshgrid has indexing='ij'
     i = i.t()  # Transpose to get correct [H, W] shape
     j = j.t()
@@ -261,7 +265,7 @@ def get_rays(H, W, K, c2w):
     # Convert pixel coordinates to normalized camera coordinates using intrinsics
     # K[0][0] = focal_x, K[1][1] = focal_y, K[0][2] = cx, K[1][2] = cy
     # This gives us ray directions in the camera coordinate system
-    dirs = torch.stack([(i - K[0][2]) / K[0][0], -(j - K[1][2]) / K[1][1], -torch.ones_like(i)], -1)
+    dirs = torch.stack([(i - focal[0][2]) / focal[0][0], -(j - focal[1][2]) / focal[1][1], -torch.ones_like(i)], -1)
 
     # Rotate ray directions from camera frame to the world frame
     rays_d = torch.sum(
@@ -273,9 +277,11 @@ def get_rays(H, W, K, c2w):
     return rays_o, rays_d
 
 
-def get_rays_np(H, W, K, c2w):
-    i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing="xy")
-    dirs = np.stack([(i - K[0][2]) / K[0][0], -(j - K[1][2]) / K[1][1], -np.ones_like(i)], -1)
+def get_rays_np(image_height, image_width, focal, c2w):
+    i, j = np.meshgrid(
+        np.arange(image_width, dtype=np.float32), np.arange(image_height, dtype=np.float32), indexing="xy"
+    )
+    dirs = np.stack([(i - focal[0][2]) / focal[0][0], -(j - focal[1][2]) / focal[1][1], -np.ones_like(i)], -1)
     # Rotate ray directions from camera frame to the world frame
     rays_d = np.sum(
         dirs[..., np.newaxis, :] * c2w[:3, :3], -1
@@ -285,18 +291,18 @@ def get_rays_np(H, W, K, c2w):
     return rays_o, rays_d
 
 
-def ndc_rays(H, W, focal, near, rays_o, rays_d):
+def ndc_rays(image_height, image_width, focal, near, rays_o, rays_d):
     # Shift ray origins to near plane
     t = -(near + rays_o[..., 2]) / rays_d[..., 2]
     rays_o = rays_o + t[..., None] * rays_d
 
     # Projection
-    o0 = -1.0 / (W / (2.0 * focal)) * rays_o[..., 0] / rays_o[..., 2]
-    o1 = -1.0 / (H / (2.0 * focal)) * rays_o[..., 1] / rays_o[..., 2]
+    o0 = -1.0 / (image_width / (2.0 * focal)) * rays_o[..., 0] / rays_o[..., 2]
+    o1 = -1.0 / (image_height / (2.0 * focal)) * rays_o[..., 1] / rays_o[..., 2]
     o2 = 1.0 + 2.0 * near / rays_o[..., 2]
 
-    d0 = -1.0 / (W / (2.0 * focal)) * (rays_d[..., 0] / rays_d[..., 2] - rays_o[..., 0] / rays_o[..., 2])
-    d1 = -1.0 / (H / (2.0 * focal)) * (rays_d[..., 1] / rays_d[..., 2] - rays_o[..., 1] / rays_o[..., 2])
+    d0 = -1.0 / (image_width / (2.0 * focal)) * (rays_d[..., 0] / rays_d[..., 2] - rays_o[..., 0] / rays_o[..., 2])
+    d1 = -1.0 / (image_height / (2.0 * focal)) * (rays_d[..., 1] / rays_d[..., 2] - rays_o[..., 1] / rays_o[..., 2])
     d2 = -2.0 * near / rays_o[..., 2]
 
     rays_o = torch.stack([o0, o1, o2], -1)
@@ -306,7 +312,7 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
 
 
 # Hierarchical sampling (section 5.2)
-def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
+def sample_pdf(bins, weights, n_samples, det=False, pytest=False):
     """
     Hierarchical sampling using inverse transform sampling.
 
@@ -341,18 +347,18 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     # Take uniform samples in [0, 1]
     if det:
         # Deterministic: evenly spaced samples
-        u = torch.linspace(0.0, 1.0, steps=N_samples, device=cdf.device)
-        u = u.expand([*list(cdf.shape[:-1]), N_samples])
+        u = torch.linspace(0.0, 1.0, steps=n_samples, device=cdf.device)
+        u = u.expand([*list(cdf.shape[:-1]), n_samples])
     else:
         # Stochastic: random samples
-        u = torch.rand([*list(cdf.shape[:-1]), N_samples], device=cdf.device)
+        u = torch.rand([*list(cdf.shape[:-1]), n_samples], device=cdf.device)
 
     # Pytest, overwrite u with numpy's fixed random numbers
     if pytest:
         np.random.seed(0)
-        new_shape = [*list(cdf.shape[:-1]), N_samples]
+        new_shape = [*list(cdf.shape[:-1]), n_samples]
         if det:
-            u = np.linspace(0.0, 1.0, N_samples)
+            u = np.linspace(0.0, 1.0, n_samples)
             u = np.broadcast_to(u, new_shape)
         else:
             u = np.random.rand(*new_shape)

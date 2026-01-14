@@ -84,7 +84,6 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     if factor is not None:
         sfx = f"_{factor}"
         _minify(basedir, factors=[factor])
-        factor = factor
     elif height is not None:
         factor = sh[0] / float(height)
         width = int(sh[1] / factor)
@@ -159,12 +158,12 @@ def poses_avg(poses):
     return c2w
 
 
-def render_path_spiral(c2w, up, rads, focal, zdelta, zrate, rots, N):
+def render_path_spiral(c2w, up, rads, focal, zrate, rots, n):
     render_poses = []
     rads = np.array([*list(rads), 1.0])
     hwf = c2w[:, 4:5]
 
-    for theta in np.linspace(0.0, 2.0 * np.pi * rots, N + 1)[:-1]:
+    for theta in np.linspace(0.0, 2.0 * np.pi * rots, n + 1)[:-1]:
         c = np.dot(c2w[:3, :4], np.array([np.cos(theta), -np.sin(theta), -np.sin(theta * zrate), 1.0]) * rads)
         z = normalize(c - np.dot(c2w[:3, :4], np.array([0, 0, -focal, 1.0])))
         render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1))
@@ -197,9 +196,9 @@ def spherify_poses(poses, bds):
     rays_o = poses[:, :3, 3:4]
 
     def min_line_dist(rays_o, rays_d):
-        A_i = np.eye(3) - rays_d * np.transpose(rays_d, [0, 2, 1])
-        b_i = -A_i @ rays_o
-        pt_mindist = np.squeeze(-np.linalg.inv((np.transpose(A_i, [0, 2, 1]) @ A_i).mean(0)) @ (b_i).mean(0))
+        a_i = np.eye(3) - rays_d * np.transpose(rays_d, [0, 2, 1])
+        b_i = -a_i @ rays_o
+        pt_mindist = np.squeeze(-np.linalg.inv((np.transpose(a_i, [0, 2, 1]) @ a_i).mean(0)) @ (b_i).mean(0))
         return pt_mindist
 
     pt_mindist = min_line_dist(rays_o, rays_d)
@@ -288,22 +287,20 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=0.75, spherify=Fa
         focal = mean_dz
 
         # Get radii for spiral path
-        zdelta = close_depth * 0.2
         tt = poses[:, :3, 3]  # ptstocam(poses[:3,3,:].T, c2w).T
         rads = np.percentile(np.abs(tt), 90, 0)
         c2w_path = c2w
-        N_views = 120
-        N_rots = 2
+        n_views = 120
+        n_rots = 2
         if path_zflat:
-            #             zloc = np.percentile(tt, 10, 0)[2]
             zloc = -close_depth * 0.1
             c2w_path[:3, 3] = c2w_path[:3, 3] + zloc * c2w_path[:3, 2]
             rads[2] = 0.0
-            N_rots = 1
-            N_views /= 2
+            n_rots = 1
+            n_views /= 2
 
         # Generate poses for spiral path
-        render_poses = render_path_spiral(c2w_path, up, rads, focal, zdelta, zrate=0.5, rots=N_rots, N=N_views)
+        render_poses = render_path_spiral(c2w_path, up, rads, focal, zrate=0.5, rots=n_rots, n=n_views)
 
     render_poses = np.array(render_poses).astype(np.float32)
 

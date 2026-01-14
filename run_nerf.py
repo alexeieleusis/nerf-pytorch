@@ -9,9 +9,9 @@ from tqdm import tqdm, trange
 
 from load_blender import load_blender_data
 from load_deepvoxels import load_dv_data
-from load_LINEMOD import load_LINEMOD_data
+from load_LINEMOD import load_linemod_dataset
 from load_llff import load_llff_data
-from run_nerf_helpers import *
+from run_nerf_helpers import NeRF, get_embedder, get_rays, get_rays_np, img2mse, mse2psnr, ndc_rays, sample_pdf, to8b
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
@@ -357,15 +357,14 @@ def render_rays(
     ray_batch,
     network_fn,
     network_query_fn,
-    N_samples,
+    n_samples,
     retraw=False,
     lindisp=False,
     perturb=0.0,
-    N_importance=0,
+    n_importance=0,
     network_fine=None,
     white_bkgd=False,
     raw_noise_std=0.0,
-    verbose=False,
     pytest=False,
 ):
     """
@@ -416,7 +415,7 @@ def render_rays(
     """
     # ========== COARSE NETWORK: Stratified Sampling ==========
     # Extract ray information from the batch
-    N_rays = ray_batch.shape[0]
+    n_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:, 0:3], ray_batch[:, 3:6]  # [N_rays, 3] each - origin and direction
     viewdirs = ray_batch[:, -3:] if ray_batch.shape[-1] > 8 else None  # viewing direction for view-dependent effects
     bounds = torch.reshape(ray_batch[..., 6:8], [-1, 1, 2])
@@ -424,7 +423,7 @@ def render_rays(
 
     # Create stratified samples along the ray
     # Divide [near, far] into N_samples bins and sample within each bin
-    t_vals = torch.linspace(0.0, 1.0, steps=N_samples, device=rays_o.device)
+    t_vals = torch.linspace(0.0, 1.0, steps=n_samples, device=rays_o.device)
     if not lindisp:
         # Sample linearly in depth: z = near + t*(far - near)
         z_vals = near * (1.0 - t_vals) + far * (t_vals)
@@ -433,7 +432,7 @@ def render_rays(
         # This allocates more samples to nearby regions
         z_vals = 1.0 / (1.0 / near * (1.0 - t_vals) + 1.0 / far * (t_vals))
 
-    z_vals = z_vals.expand([N_rays, N_samples])
+    z_vals = z_vals.expand([n_rays, n_samples])
 
     # Add random jitter for stratified sampling (Section 4)
     # This prevents aliasing and helps the network learn a continuous representation
@@ -466,7 +465,7 @@ def render_rays(
 
     # ========== FINE NETWORK: Hierarchical Sampling ==========
     # If using hierarchical sampling (Section 5.2), use coarse weights to guide fine sampling
-    if N_importance > 0:
+    if n_importance > 0:
         # Save coarse network outputs
         rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
 
@@ -475,7 +474,7 @@ def render_rays(
         z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])  # Midpoints of coarse bins
         # Use inverse transform sampling to draw N_importance samples from the PDF
         # defined by the coarse network weights (which encode density)
-        z_samples = sample_pdf(z_vals_mid, weights[..., 1:-1], N_importance, det=(perturb < 1e-10), pytest=pytest)
+        z_samples = sample_pdf(z_vals_mid, weights[..., 1:-1], n_importance, det=(perturb < 1e-10), pytest=pytest)
         z_samples = z_samples.detach()  # Don't backprop through sampling
 
         # Combine coarse and fine samples, then sort along each ray
@@ -497,7 +496,7 @@ def render_rays(
     ret = {"rgb_map": rgb_map, "disp_map": disp_map, "acc_map": acc_map}
     if retraw:
         ret["raw"] = raw
-    if N_importance > 0:
+    if n_importance > 0:
         ret["rgb0"] = rgb_map_0
         ret["disp0"] = disp_map_0
         ret["acc0"] = acc_map_0
@@ -672,7 +671,7 @@ def train():
         images = (images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])) if args.white_bkgd else images[..., :3]
 
     elif args.dataset_type == "LINEMOD":
-        images, poses, render_poses, hwf, K, i_split, near, far = load_LINEMOD_data(
+        images, poses, render_poses, hwf, K, i_split, near, far = load_linemod_dataset(
             args.datadir, args.half_res, args.testskip
         )
         print(f"Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}")
@@ -689,9 +688,9 @@ def train():
         print("Loaded deepvoxels", images.shape, render_poses.shape, hwf, args.datadir)
         i_train, i_val, i_test = i_split
 
-        hemi_R = np.mean(np.linalg.norm(poses[:, :3, -1], axis=-1))
-        near = hemi_R - 1.0
-        far = hemi_R + 1.0
+        hemi_r = np.mean(np.linalg.norm(poses[:, :3, -1], axis=-1))
+        near = hemi_r - 1.0
+        far = hemi_r + 1.0
 
     else:
         print("Unknown dataset type", args.dataset_type, "exiting")
@@ -765,7 +764,7 @@ def train():
             return
 
     # Prepare raybatch tensor if batching random rays
-    N_rand = args.N_rand
+    n_rand = args.N_rand
     use_batching = not args.no_batching
     if use_batching:
         # For random ray batching
@@ -790,7 +789,7 @@ def train():
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
-    N_iters = 200000 + 1
+    n_iters = 200000 + 1
     print("Begin")
     print("TRAIN views are", i_train)
     print("TEST views are", i_test)
@@ -800,17 +799,17 @@ def train():
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
 
     start = start + 1
-    for i in trange(start, N_iters):
+    for i in trange(start, n_iters):
         _time0 = time.time()
 
         # Sample random ray batch
         if use_batching:
             # Random over all images
-            batch = rays_rgb[i_batch : i_batch + N_rand]  # [B, 2+1, 3*?]
+            batch = rays_rgb[i_batch : i_batch + n_rand]  # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
             batch_rays, target_s = batch[:2], batch[2]
 
-            i_batch += N_rand
+            i_batch += n_rand
             if i_batch >= rays_rgb.shape[0]:
                 print("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
@@ -824,22 +823,24 @@ def train():
             target = torch.Tensor(target).to(device)
             pose = poses[img_i, :3, :4]
 
-            if N_rand is not None:
+            if n_rand is not None:
                 rays_o, rays_d = get_rays(H, W, K, torch.tensor(pose, device=device))  # (H, W, 3), (H, W, 3)
 
                 if i < args.precrop_iters:
-                    dH = int(H // 2 * args.precrop_frac)
-                    dW = int(W // 2 * args.precrop_frac)
+                    crop_height = int(H // 2 * args.precrop_frac)
+                    crop_width = int(W // 2 * args.precrop_frac)
                     coords = torch.stack(
                         torch.meshgrid(
-                            torch.linspace(H // 2 - dH, H // 2 + dH - 1, 2 * dH, device=device),
-                            torch.linspace(W // 2 - dW, W // 2 + dW - 1, 2 * dW, device=device),
+                            torch.linspace(
+                                H // 2 - crop_height, H // 2 + crop_height - 1, 2 * crop_height, device=device
+                            ),
+                            torch.linspace(W // 2 - crop_width, W // 2 + crop_width - 1, 2 * crop_width, device=device),
                         ),
                         -1,
                     )
                     if i == start:
                         print(
-                            f"[Config] Center cropping of size {2 * dH} x {2 * dW} is enabled until iter {args.precrop_iters}"
+                            f"[Config] Center cropping of size {2 * crop_height} x {2 * crop_width} is enabled until iter {args.precrop_iters}"
                         )
                 else:
                     coords = torch.stack(
@@ -850,7 +851,7 @@ def train():
                     )  # (H, W, 2)
 
                 coords = torch.reshape(coords, [-1, 2])  # (H * W, 2)
-                select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,)
+                select_inds = np.random.choice(coords.shape[0], size=[n_rand], replace=False)  # (N_rand,)
                 select_coords = coords[select_inds].long()  # (N_rand, 2)
                 rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
@@ -894,10 +895,6 @@ def train():
             param_group["lr"] = new_lrate
         ################################
 
-        # dt = time.time() - time0
-        # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
-        #####           end            #####
-
         # Rest is logging
         if i % args.i_weights == 0:
             path = os.path.join(basedir, expname, f"{i:06d}.tar")
@@ -920,13 +917,6 @@ def train():
             moviebase = os.path.join(basedir, expname, f"{expname}_spiral_{i:06d}_")
             imageio.mimwrite(moviebase + "rgb.mp4", to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + "disp.mp4", to8b(disps / np.max(disps)), fps=30, quality=8)
-
-            # if args.use_viewdirs:
-            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
-            #     with torch.no_grad():
-            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            #     render_kwargs_test['c2w_staticcam'] = None
-            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
         if i % args.i_testset == 0 and i > 0:
             testsavedir = os.path.join(basedir, expname, f"testset_{i:06d}")
