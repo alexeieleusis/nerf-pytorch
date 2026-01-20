@@ -1,3 +1,29 @@
+"""
+NeRF Helper Functions and Neural Network Architecture
+=====================================================
+
+This module contains the core building blocks for Neural Radiance Fields (NeRF):
+
+1. Positional Encoding (Section 5.1):
+   - Embedder class: Implements gamma(p) function
+   - Maps low-dimensional coordinates to high-dimensional space
+   - Enables learning of high-frequency variations in geometry and color
+
+2. NeRF MLP Architecture (Section 3):
+   - 8-layer fully-connected network with skip connections
+   - Separate branches for density (view-independent) and color (view-dependent)
+   - Processes encoded 5D input: position (x,y,z) + viewing direction (θ,φ)
+
+3. Ray Generation and Sampling:
+   - Camera ray generation from pinhole camera model
+   - NDC coordinate transformation for forward-facing scenes
+   - Hierarchical sampling using inverse transform sampling (Section 5.2)
+
+4. Utility Functions:
+   - img2mse: Mean squared error loss
+   - mse2psnr: Convert MSE to Peak Signal-to-Noise Ratio
+   - to8b: Convert float images to 8-bit for saving
+"""
 import numpy as np
 import torch
 
@@ -5,7 +31,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Misc
+# Misc utility functions
 img2mse = lambda x, y: torch.mean((x - y) ** 2)
 mse2psnr = lambda x: -10.0 * torch.log(x) / torch.log(torch.tensor([10.0], device=x.device))
 to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
@@ -114,12 +140,12 @@ class NeRF(nn.Module):
     def __init__(self, depth=8, width=256, input_ch=3, input_ch_views=3, output_ch=4, skips=None, use_viewdirs=False):
         """
         Args:
-            D: Number of layers in the main MLP
-            W: Width (number of channels) of each layer
+            depth: Number of layers in the main MLP (default: 8, denoted as D in paper)
+            width: Width (number of channels) of each layer (default: 256, denoted as W in paper)
             input_ch: Number of input channels for position (63 with positional encoding, L=10)
             input_ch_views: Number of input channels for viewing direction (27 with encoding, L=4)
             output_ch: Number of output channels (4 for RGB+density, or 5 for coarse/fine models)
-            skips: Layers at which to add skip connections (typically [4] for layer 5)
+            skips: List of layer indices to add skip connections (typically [4] for skip at layer 5)
             use_viewdirs: Whether to use viewing direction as input (enables view-dependent effects)
         """
         super().__init__()
@@ -244,8 +270,9 @@ def get_rays(image_height, image_width, focal, c2w):
     - t is the distance along the ray
 
     Args:
-        H, W: Image height and width in pixels
-        K: Camera intrinsic matrix [3x3] containing focal length and principal point
+        image_height: Image height in pixels (H in paper notation)
+        image_width: Image width in pixels (W in paper notation)
+        focal: Camera intrinsic matrix [3x3] containing focal length and principal point (K in paper)
         c2w: Camera-to-world transformation matrix [3x4] (extrinsics)
 
     Returns:
@@ -278,6 +305,22 @@ def get_rays(image_height, image_width, focal, c2w):
 
 
 def get_rays_np(image_height, image_width, focal, c2w):
+    """
+    Generate ray origins and directions for all pixels in an image (NumPy version).
+
+    This is the NumPy equivalent of get_rays(), used for preprocessing and batching.
+    Implements the same camera model to cast rays through each pixel.
+
+    Args:
+        image_height: Image height in pixels
+        image_width: Image width in pixels
+        focal: Camera intrinsic matrix [3x3] containing focal length and principal point
+        c2w: Camera-to-world transformation matrix [3x4] (extrinsics)
+
+    Returns:
+        rays_o: [H, W, 3] Ray origins (all equal to camera center in world coordinates)
+        rays_d: [H, W, 3] Ray directions in world coordinates
+    """
     i, j = np.meshgrid(
         np.arange(image_width, dtype=np.float32), np.arange(image_height, dtype=np.float32), indexing="xy"
     )
@@ -292,6 +335,38 @@ def get_rays_np(image_height, image_width, focal, c2w):
 
 
 def ndc_rays(image_height, image_width, focal, near, rays_o, rays_d):
+    """
+    Transform rays from world coordinates to Normalized Device Coordinates (NDC).
+
+    This transformation is used for forward-facing scenes (LLFF dataset) to better handle
+    unbounded scenes. NDC space normalizes the viewing frustum to a canonical coordinate
+    system where depth is more uniformly distributed.
+
+    The transformation:
+    1. Shifts ray origins to the near plane
+    2. Projects rays into NDC space using perspective projection
+    3. Remaps depth so that the near plane maps to 1 and infinity maps to -1
+
+    This is particularly useful for:
+    - Forward-facing scenes with unbounded backgrounds
+    - Improving sampling efficiency in depth
+    - Better numerical stability for scenes with large depth ranges
+
+    Reference: This follows the NDC formulation from the NeRF paper supplement and
+    Local Light Field Fusion (LLFF) paper.
+
+    Args:
+        image_height: Image height in pixels
+        image_width: Image width in pixels
+        focal: Focal length of the camera
+        near: Near plane distance
+        rays_o: [N_rays, 3] Ray origins in world coordinates
+        rays_d: [N_rays, 3] Ray directions in world coordinates
+
+    Returns:
+        rays_o: [N_rays, 3] Ray origins in NDC coordinates
+        rays_d: [N_rays, 3] Ray directions in NDC coordinates
+    """
     # Shift ray origins to near plane
     t = -(near + rays_o[..., 2]) / rays_d[..., 2]
     rays_o = rays_o + t[..., None] * rays_d

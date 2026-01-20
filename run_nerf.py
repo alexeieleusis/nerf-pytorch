@@ -1,3 +1,27 @@
+"""
+NeRF: Neural Radiance Fields for View Synthesis
+================================================
+
+This module implements the training and rendering pipeline for NeRF as described in:
+"NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis"
+by Mildenhall et al., ECCV 2020
+
+Key Concepts:
+- Represents scenes as continuous 5D functions: (x, y, z, θ, φ) → (R, G, B, σ)
+- Uses positional encoding to capture high-frequency scene details
+- Employs volume rendering to synthesize novel views
+- Hierarchical sampling strategy for efficient computation
+
+Main Components:
+- Volume Rendering: Classical rendering equation (Section 4)
+- Positional Encoding: Maps coordinates to higher dimensions (Section 5.1)
+- Hierarchical Sampling: Two-stage coarse-to-fine sampling (Section 5.2)
+- Photometric Loss: MSE between rendered and ground truth images
+
+Usage:
+    python run_nerf.py --config configs/lego.txt  # Train on synthetic lego scene
+    python run_nerf.py --config configs/fern.txt  # Train on real forward-facing scene
+"""
 import os
 import time
 
@@ -19,7 +43,23 @@ DEBUG = False
 
 
 def batchify(fn, chunk):
-    """Constructs a version of 'fn' that applies to smaller batches."""
+    """
+    Constructs a version of 'fn' that applies to smaller batches for memory efficiency.
+
+    This is a wrapper function that splits large inputs into smaller chunks to prevent
+    out-of-memory errors when processing through neural networks. This is particularly
+    important for NeRF because:
+    - Networks may receive thousands of query points simultaneously
+    - Full-resolution rendering can require millions of network evaluations
+    - GPU memory is limited
+
+    Args:
+        fn: Function to apply (typically a neural network forward pass)
+        chunk: Maximum number of inputs to process at once. If None, process all at once.
+
+    Returns:
+        ret: Wrapped function that processes inputs in chunks and concatenates results
+    """
     if chunk is None:
         return fn
 
@@ -30,7 +70,28 @@ def batchify(fn, chunk):
 
 
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64):
-    """Prepares inputs and applies network 'fn'."""
+    """
+    Prepares inputs with positional encoding and applies network in batches.
+
+    This function:
+    1. Flattens 3D position inputs
+    2. Applies positional encoding to positions (gamma function from Section 5.1)
+    3. Optionally applies positional encoding to viewing directions
+    4. Concatenates encoded position and direction
+    5. Queries the network in chunks for memory efficiency
+    6. Reshapes output back to original batch structure
+
+    Args:
+        inputs: [N_rays, N_samples, 3] 3D sample positions along rays
+        viewdirs: [N_rays, 3] Viewing directions for each ray, or None
+        fn: Neural network function (NeRF model)
+        embed_fn: Positional encoding function for 3D positions
+        embeddirs_fn: Positional encoding function for viewing directions
+        netchunk: Maximum number of points to send through network at once
+
+    Returns:
+        outputs: [N_rays, N_samples, 4] Network predictions (RGB + sigma)
+    """
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
 
@@ -46,7 +107,23 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64
 
 
 def batchify_rays(rays_flat, chunk=1024 * 32, **kwargs):
-    """Render rays in smaller minibatches to avoid OOM."""
+    """
+    Render rays in smaller minibatches to avoid out-of-memory errors.
+
+    During rendering, we may need to process thousands of rays simultaneously. Each ray
+    requires sampling multiple points (N_samples + N_importance), and each point requires
+    a network evaluation. This function splits the rays into smaller batches to manage
+    memory usage while maintaining identical results to processing all rays at once.
+
+    Args:
+        rays_flat: [N_rays, ...] Batch of rays to render
+        chunk: Maximum number of rays to process simultaneously (default: 32768)
+        **kwargs: Additional arguments passed to render_rays()
+
+    Returns:
+        all_ret: Dictionary containing rendering outputs (rgb_map, disp_map, acc_map, etc.)
+                 concatenated across all batches
+    """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
         ret = render_rays(rays_flat[i : i + chunk], **kwargs)
@@ -74,27 +151,36 @@ def render(
     verbose=False,
     **kwargs,
 ):
-    """Render rays
+    """
+    Render rays to generate RGB image, depth map, and opacity.
+
+    This is the main rendering interface that orchestrates the entire volume rendering
+    pipeline. It can either render a full image from a camera pose or render a batch
+    of pre-generated rays.
+
     Args:
-      H: int. Height of image in pixels.
-      W: int. Width of image in pixels.
-      focal: float. Focal length of pinhole camera.
-      chunk: int. Maximum number of rays to process simultaneously. Used to
-        control maximum memory usage. Does not affect final results.
-      rays: array of shape [2, batch_size, 3]. Ray origin and direction for
-        each example in batch.
-      c2w: array of shape [3, 4]. Camera-to-world transformation matrix.
-      ndc: bool. If True, represent ray origin, direction in NDC coordinates.
-      near: float or array of shape [batch_size]. Nearest distance for a ray.
-      far: float or array of shape [batch_size]. Farthest distance for a ray.
-      use_viewdirs: bool. If True, use viewing direction of a point in space in model.
-      c2w_staticcam: array of shape [3, 4]. If not None, use this transformation matrix for
-       camera while using other c2w argument for viewing directions.
+        height: Image height in pixels (H in paper notation)
+        width: Image width in pixels (W in paper notation)
+        focal: Focal length of pinhole camera (can be intrinsic matrix K)
+        chunk: Maximum number of rays to process simultaneously. Used to
+            control maximum memory usage. Does not affect final results.
+        rays: Array of shape [2, batch_size, 3]. Ray origin and direction for
+            each example in batch.
+        c2w: Array of shape [3, 4]. Camera-to-world transformation matrix.
+        ndc: If True, represent ray origin, direction in NDC coordinates (for forward-facing scenes).
+        near: Nearest distance for a ray (float or array of shape [batch_size])
+        far: Farthest distance for a ray (float or array of shape [batch_size])
+        use_viewdirs: If True, use viewing direction for view-dependent effects (Section 5.1)
+        c2w_staticcam: Array of shape [3, 4]. If not None, use this transformation matrix for
+            camera while using other c2w argument for viewing directions.
+        verbose: If True, print debugging information
+        **kwargs: Additional arguments passed to render_rays()
+
     Returns:
-      rgb_map: [batch_size, 3]. Predicted RGB values for rays.
-      disp_map: [batch_size]. Disparity map. Inverse of depth.
-      acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
-      extras: dict with everything returned by render_rays().
+        rgb_map: [batch_size, 3] Predicted RGB values for rays
+        disp_map: [batch_size] Disparity map (inverse of depth)
+        acc_map: [batch_size] Accumulated opacity (alpha) along each ray
+        extras: Dictionary with everything returned by render_rays() (includes coarse outputs if hierarchical)
     """
     if c2w is not None:
         # special case to render full image
@@ -139,6 +225,27 @@ def render(
 
 
 def render_path(render_poses, hwf, k, chunk, render_kwargs, savedir=None, render_factor=0):
+    """
+    Render images from a sequence of camera poses (for creating videos).
+
+    This function is used to:
+    1. Render test set images for quantitative evaluation
+    2. Generate novel view synthesis videos (spiral/sphere paths)
+    3. Visualize the learned scene representation
+
+    Args:
+        render_poses: [N, 3, 4] Sequence of camera-to-world transformation matrices
+        hwf: [3] Height, width, focal length tuple
+        k: [3, 3] Camera intrinsic matrix
+        chunk: Maximum number of rays to process simultaneously
+        render_kwargs: Dictionary of rendering parameters (networks, sampling settings, etc.)
+        savedir: Directory to save rendered images (if None, don't save individual frames)
+        render_factor: Downsampling factor (0 = full resolution, 2 = half, 4 = quarter, etc.)
+
+    Returns:
+        rgbs: [N, H, W, 3] Rendered RGB images
+        disps: [N, H, W] Disparity maps
+    """
 
     H, W, focal = hwf
 
@@ -173,7 +280,29 @@ def render_path(render_poses, hwf, k, chunk, render_kwargs, savedir=None, render
 
 
 def create_nerf(args):
-    """Instantiate NeRF's MLP model."""
+    """
+    Instantiate NeRF's MLP model and optimizer.
+
+    This function sets up the complete NeRF architecture:
+    1. Creates positional encoding functions for position and viewing direction
+    2. Instantiates coarse network
+    3. Instantiates fine network (if hierarchical sampling is enabled)
+    4. Sets up Adam optimizer
+    5. Loads checkpoint if available
+
+    The two-network setup (coarse + fine) implements hierarchical volume sampling
+    from Section 5.2 of the paper.
+
+    Args:
+        args: Parsed command-line arguments containing hyperparameters
+
+    Returns:
+        render_kwargs_train: Dictionary of parameters for training rendering
+        render_kwargs_test: Dictionary of parameters for test rendering
+        start: Starting iteration number (for resuming training)
+        grad_vars: List of parameters to optimize
+        optimizer: Adam optimizer instance
+    """
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
 
     input_ch_views = 0
@@ -355,7 +484,27 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
 
 def _create_stratified_samples(rays_o, near, far, n_samples, lindisp, perturb, pytest):
-    """Create stratified samples along rays."""
+    """
+    Create stratified samples along rays (Section 4 - Stratified Sampling).
+
+    Stratified sampling divides each ray into N_samples evenly-spaced bins and
+    samples one point randomly within each bin. This approach:
+    1. Ensures continuous representation of the scene
+    2. Prevents aliasing from regular sampling
+    3. Enables optimization of the continuous volumetric representation
+
+    Args:
+        rays_o: [N_rays, 3] Ray origins
+        near: Near plane distance for sampling
+        far: Far plane distance for sampling
+        n_samples: Number of samples per ray (typically 64 for coarse network)
+        lindisp: If True, sample linearly in disparity (1/depth) rather than depth
+        perturb: If > 0, add random jitter within bins (training). If 0, deterministic (testing)
+        pytest: If True, use fixed random seed for testing
+
+    Returns:
+        z_vals: [N_rays, N_samples] Sample depths along each ray
+    """
     t_vals = torch.linspace(0.0, 1.0, steps=n_samples, device=rays_o.device)
     if not lindisp:
         z_vals = near * (1.0 - t_vals) + far * (t_vals)
@@ -381,7 +530,31 @@ def _create_stratified_samples(rays_o, near, far, n_samples, lindisp, perturb, p
 
 
 def _perform_hierarchical_sampling(z_vals, weights, n_importance, perturb, pytest):
-    """Perform hierarchical sampling using coarse network weights."""
+    """
+    Perform hierarchical sampling using coarse network weights (Section 5.2).
+
+    This implements the two-stage sampling strategy:
+    1. Coarse network identifies where the scene content is (via density predictions)
+    2. Fine network focuses samples on relevant regions using importance sampling
+
+    The coarse network's weights form a probability distribution along each ray,
+    indicating where volume density (and thus scene content) is likely to be.
+    We use inverse transform sampling to draw additional samples from this distribution,
+    concentrating computation on regions that matter.
+
+    This approach significantly improves quality without wasting samples on empty space.
+
+    Args:
+        z_vals: [N_rays, N_samples] Sample depths from coarse network
+        weights: [N_rays, N_samples-2] Weights from coarse network (proportional to density)
+        n_importance: Number of additional fine samples per ray (typically 128)
+        perturb: If > 0, use stochastic sampling; if 0, deterministic
+        pytest: If True, use fixed random seed for testing
+
+    Returns:
+        z_vals: [N_rays, N_samples + N_importance] Combined and sorted sample depths
+        z_samples: [N_rays, N_importance] The new importance samples
+    """
     z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
     z_samples = sample_pdf(z_vals_mid, weights[..., 1:-1], n_importance, det=(perturb < 1e-10), pytest=pytest)
     z_samples = z_samples.detach()
@@ -684,7 +857,43 @@ def _load_deepvoxels_dataset(args):
 
 
 def load_dataset(args):
-    """Load dataset based on dataset type and return relevant data."""
+    """
+    Load dataset based on dataset type and return relevant data.
+
+    Supports four dataset types:
+    1. LLFF (Local Light Field Fusion): Real-world forward-facing scenes
+       - 20-30 images per scene
+       - Uses NDC ray parameterization
+       - Camera poses estimated from COLMAP
+
+    2. Blender: Synthetic scenes with perfect ground truth
+       - Rendered images with known camera poses
+       - Clean backgrounds, controlled lighting
+       - Used for quantitative evaluation
+
+    3. LINEMOD: Object recognition dataset
+       - Object-centric captures
+       - Intrinsic camera matrix provided
+
+    4. DeepVoxels: Synthetic object-centric data
+       - Hemispheric camera arrangement
+       - Voxel-based baseline comparisons
+
+    Args:
+        args: Parsed arguments containing dataset_type and data paths
+
+    Returns:
+        images: [N, H, W, 3] RGB images
+        poses: [N, 3, 4] Camera-to-world transformation matrices
+        hwf: [3] Height, width, focal length
+        render_poses: Poses for novel view rendering
+        i_train: Indices of training images
+        i_val: Indices of validation images
+        i_test: Indices of test images
+        K: Camera intrinsic matrix (or None)
+        near: Near plane distance
+        far: Far plane distance
+    """
     dataset_loaders = {
         "llff": _load_llff_dataset,
         "blender": _load_blender_dataset,
@@ -701,7 +910,27 @@ def load_dataset(args):
 
 
 def setup_logging_dirs(basedir, expname, args):
-    """Create log directories and save config files."""
+    """
+    Create log directories and save config files for experiment tracking.
+
+    This ensures reproducibility by:
+    1. Creating experiment directory structure
+    2. Saving all command-line arguments
+    3. Saving config file for future reference
+
+    Directory structure created:
+    logs/
+    └── {expname}/
+        ├── args.txt          # All hyperparameters
+        ├── config.txt        # Original config file
+        ├── {iter:06d}.tar   # Model checkpoints
+        └── testset_{iter}/  # Rendered test images
+
+    Args:
+        basedir: Base directory for logs (typically ./logs/)
+        expname: Experiment name (used as subdirectory)
+        args: Parsed arguments to save
+    """
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
 
     # Save args
@@ -721,7 +950,32 @@ def setup_logging_dirs(basedir, expname, args):
 def handle_render_only_mode(
     args, render_poses, hwf, focus, render_kwargs_test, basedir, expname, start, images, i_test
 ):
-    """Handle render-only mode execution."""
+    """
+    Handle render-only mode execution (no training).
+
+    This mode is used to:
+    1. Generate novel view synthesis videos from trained models
+    2. Render test set images for quantitative evaluation
+    3. Create visualizations of learned scene representations
+
+    Invoked with: python run_nerf.py --config configs/scene.txt --render_only
+
+    The function loads a trained checkpoint and renders either:
+    - Test set images (if --render_test flag is set)
+    - Novel view path (spiral/sphere trajectory otherwise)
+
+    Args:
+        args: Parsed arguments
+        render_poses: Camera poses for rendering
+        hwf: Height, width, focal length
+        focus: Camera intrinsic matrix
+        render_kwargs_test: Rendering parameters for test mode
+        basedir: Base directory for logs
+        expname: Experiment name
+        start: Starting iteration (from loaded checkpoint)
+        images: Dataset images
+        i_test: Test set indices
+    """
     print("RENDER ONLY")
     with torch.no_grad():
         images = images[i_test] if args.render_test else None
@@ -745,7 +999,31 @@ def handle_render_only_mode(
 
 
 def prepare_ray_batching(use_batching, image_height, image_width, focus, poses, images, i_train):
-    """Prepare ray batching data structures."""
+    """
+    Prepare ray batching data structures for efficient training.
+
+    When ray batching is enabled, this function:
+    1. Pre-computes rays for all pixels in all training images
+    2. Concatenates rays with their corresponding RGB values
+    3. Shuffles the rays to ensure random sampling across images
+    4. Creates a large pool of [ray_origin, ray_direction, RGB] tuples
+
+    This allows sampling random rays from across the entire training set,
+    which can improve convergence but requires significant GPU memory.
+
+    Args:
+        use_batching: Whether to use ray batching (False if --no_batching flag set)
+        image_height: Image height in pixels
+        image_width: Image width in pixels
+        focus: Camera intrinsic matrix
+        poses: [N, 3, 4] Camera poses
+        images: [N, H, W, 3] Training images
+        i_train: Indices of training images
+
+    Returns:
+        rays_rgb: [N_rays, 3, 3] Pre-computed rays and RGB values, or None
+        i_batch: Starting batch index (0)
+    """
     if not use_batching:
         return None, 0
 
@@ -766,7 +1044,44 @@ def prepare_ray_batching(use_batching, image_height, image_width, focus, poses, 
 def sample_ray_batch(
     use_batching, rays_rgb, i_batch, n_rand, images, poses, i_train, image_height, image_width, focus, args, i, start
 ):
-    """Sample a batch of rays for training."""
+    """
+    Sample a batch of rays for training.
+
+    Two sampling strategies are supported:
+    1. Ray batching (use_batching=True):
+       - Pre-compute all rays from all training images
+       - Sample random rays from the entire training set
+       - More memory intensive but ensures diverse ray samples
+
+    2. Image-based sampling (use_batching=False, no_batching flag):
+       - Select one random training image
+       - Sample random rays only from that image
+       - Less memory but may slow convergence
+
+    The paper uses image-based sampling by default. Ray batching can improve
+    convergence for some scenes but requires more GPU memory.
+
+    Args:
+        use_batching: Whether to use pre-computed ray batches
+        rays_rgb: Pre-computed rays and RGB values (if batching)
+        i_batch: Current batch index (if batching)
+        n_rand: Number of random rays to sample (typically 4096)
+        images: Training images
+        poses: Camera poses
+        i_train: Indices of training images
+        image_height: Image height
+        image_width: Image width
+        focus: Camera intrinsic matrix
+        args: Training arguments (contains precrop settings)
+        i: Current training iteration
+        start: Starting iteration (for precrop)
+
+    Returns:
+        batch_rays: [2, N_rand, 3] Ray origins and directions
+        target_s: [N_rand, 3] Ground truth RGB for sampled rays
+        rays_rgb: Updated pre-computed rays (if batching)
+        i_batch: Updated batch index (if batching)
+    """
     if use_batching:
         batch = rays_rgb[i_batch : i_batch + n_rand]
         batch = torch.transpose(batch, 0, 1)
@@ -800,7 +1115,26 @@ def sample_ray_batch(
 
 
 def _get_sampling_coords(image_height, image_width, i, args, start):
-    """Get coordinate sampling grid for ray selection."""
+    """
+    Get coordinate sampling grid for ray selection with optional center cropping.
+
+    During early training iterations, center cropping can help:
+    1. Focus learning on the central object/content first
+    2. Avoid wasting computation on background in early iterations
+    3. Stabilize training by learning easier central regions first
+
+    After precrop_iters iterations, sampling expands to the full image.
+
+    Args:
+        image_height: Image height in pixels
+        image_width: Image width in pixels
+        i: Current training iteration
+        args: Arguments containing precrop_iters and precrop_frac
+        start: Starting iteration (for logging)
+
+    Returns:
+        coords: [N_pixels, 2] Flattened pixel coordinates available for sampling
+    """
     if i < args.precrop_iters:
         crop_height = int(image_height // 2 * args.precrop_frac)
         crop_width = int(image_width // 2 * args.precrop_frac)
@@ -832,7 +1166,27 @@ def _get_sampling_coords(image_height, image_width, i, args, start):
 
 
 def compute_training_loss(rgb, target_s, extras):
-    """Compute training loss from rendered RGB and ground truth."""
+    """
+    Compute photometric training loss from rendered RGB and ground truth.
+
+    The loss function is a simple mean squared error (MSE) between rendered pixels
+    and ground truth pixels. When using hierarchical sampling, the loss includes
+    contributions from both the coarse and fine networks:
+
+    L = MSE(C_fine, C_gt) + MSE(C_coarse, C_gt)
+
+    This dual loss helps train both networks and ensures the coarse network provides
+    useful guidance for hierarchical sampling.
+
+    Args:
+        rgb: [N_rays, 3] Rendered RGB from fine network
+        target_s: [N_rays, 3] Ground truth RGB values
+        extras: Dictionary potentially containing 'rgb0' (coarse network output)
+
+    Returns:
+        loss: Combined MSE loss (fine + coarse if hierarchical)
+        psnr: Peak Signal-to-Noise Ratio in dB (quality metric)
+    """
     img_loss = img2mse(rgb, target_s)
     loss = img_loss
     psnr = mse2psnr(img_loss)
@@ -845,7 +1199,24 @@ def compute_training_loss(rgb, target_s, extras):
 
 
 def update_learning_rate(optimizer, args, global_step):
-    """Update learning rate with exponential decay."""
+    """
+    Update learning rate with exponential decay.
+
+    The learning rate follows an exponential decay schedule:
+    lr(t) = lr_init × (0.1)^(t / decay_steps)
+
+    where decay_steps = lrate_decay × 1000 (typically 250,000 steps).
+
+    This gradual learning rate reduction helps:
+    1. Make large updates early in training for rapid convergence
+    2. Make fine-grained updates later for detail refinement
+    3. Stabilize training as the model approaches convergence
+
+    Args:
+        optimizer: PyTorch Adam optimizer
+        args: Arguments containing lrate (initial rate) and lrate_decay
+        global_step: Current training iteration
+    """
     decay_rate = 0.1
     decay_steps = args.lrate_decay * 1000
     new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
@@ -854,7 +1225,27 @@ def update_learning_rate(optimizer, args, global_step):
 
 
 def save_checkpoint(i, basedir, expname, global_step, render_kwargs_train, optimizer):
-    """Save model checkpoint."""
+    """
+    Save model checkpoint for resuming training or inference.
+
+    Checkpoints contain:
+    - Network weights (coarse and fine)
+    - Optimizer state (for seamless training resumption)
+    - Global step counter
+
+    This allows:
+    1. Resuming training after interruption
+    2. Loading trained models for novel view synthesis
+    3. Fine-tuning from pre-trained checkpoints
+
+    Args:
+        i: Current iteration
+        basedir: Base directory for logs
+        expname: Experiment name
+        global_step: Global training step counter
+        render_kwargs_train: Dictionary containing network models
+        optimizer: Adam optimizer with state
+    """
     path = os.path.join(basedir, expname, f"{i:06d}.tar")
     torch.save(
         {
@@ -898,29 +1289,46 @@ def save_test_outputs(i, basedir, expname, poses, i_test, hwf, focus, args, rend
 def _handle_periodic_logging(
     i,
     args,
-    basedir,
-    expname,
-    global_step,
-    render_kwargs_train,
-    render_kwargs_test,
-    optimizer,
-    render_poses,
-    hwf,
-    focus,
-    poses,
-    i_test,
+    training_state,
+    scene_data,
     loss,
     psnr,
 ):
     """Handle periodic saves and logging during training."""
     if i % args.i_weights == 0:
-        save_checkpoint(i, basedir, expname, global_step, render_kwargs_train, optimizer)
+        save_checkpoint(
+            i,
+            training_state["basedir"],
+            training_state["expname"],
+            training_state["global_step"],
+            training_state["render_kwargs_train"],
+            training_state["optimizer"],
+        )
 
     if i % args.i_video == 0 and i > 0:
-        save_video_outputs(i, basedir, expname, render_poses, hwf, focus, args, render_kwargs_test)
+        save_video_outputs(
+            i,
+            training_state["basedir"],
+            training_state["expname"],
+            scene_data["render_poses"],
+            scene_data["hwf"],
+            scene_data["focus"],
+            args,
+            training_state["render_kwargs_test"],
+        )
 
     if i % args.i_testset == 0 and i > 0:
-        save_test_outputs(i, basedir, expname, poses, i_test, hwf, focus, args, render_kwargs_test)
+        save_test_outputs(
+            i,
+            training_state["basedir"],
+            training_state["expname"],
+            scene_data["poses"],
+            scene_data["i_test"],
+            scene_data["hwf"],
+            scene_data["focus"],
+            args,
+            training_state["render_kwargs_test"],
+        )
 
     if i % args.i_print == 0:
         tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
@@ -936,6 +1344,38 @@ def _prepare_training_data(use_batching, images, poses, rays_rgb):
 
 
 def train():
+    """
+    Main training function for Neural Radiance Fields (NeRF).
+
+    This function implements the complete NeRF training pipeline as described in the paper:
+    "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis"
+
+    Training Pipeline:
+    1. Load dataset (synthetic Blender, real LLFF, DeepVoxels, or LINEMOD)
+    2. Initialize coarse and fine networks with positional encoding
+    3. For 200k iterations:
+        a. Sample random rays from training images
+        b. Stratified sampling: Sample N_samples (64) points along each ray
+        c. Query coarse network at sample points
+        d. Hierarchical sampling: Sample N_importance (128) additional points using coarse weights
+        e. Query fine network at all points
+        f. Volume rendering: Compute RGB using classical volume rendering (Section 4)
+        g. Compute photometric loss: MSE between rendered and ground truth RGB
+        h. Backpropagate and update weights with Adam optimizer
+        i. Periodically save checkpoints, render test views, and generate videos
+
+    Key Components:
+    - Positional Encoding (Section 5.1): Maps 3D coordinates to higher dimensions
+    - Volume Rendering (Section 4): Accumulates color and density along rays
+    - Hierarchical Sampling (Section 5.2): Two-stage coarse-to-fine sampling
+    - View-Dependent Effects: Conditions color on viewing direction for specularities
+
+    The result is a continuous 5D function (x, y, z, θ, φ) → (R, G, B, σ) that can
+    synthesize photorealistic novel views of the scene.
+
+    Returns:
+        None (saves checkpoints and rendered outputs to disk)
+    """
     parser = config_parser()
     args = parser.parse_args()
 
@@ -1014,20 +1454,26 @@ def train():
         update_learning_rate(optimizer, args, global_step)
 
         # Periodic saves and logging
+        training_state = {
+            "basedir": basedir,
+            "expname": expname,
+            "global_step": global_step,
+            "render_kwargs_train": render_kwargs_train,
+            "render_kwargs_test": render_kwargs_test,
+            "optimizer": optimizer,
+        }
+        scene_data = {
+            "render_poses": render_poses,
+            "hwf": hwf,
+            "focus": K,
+            "poses": poses,
+            "i_test": i_test,
+        }
         _handle_periodic_logging(
             i,
             args,
-            basedir,
-            expname,
-            global_step,
-            render_kwargs_train,
-            render_kwargs_test,
-            optimizer,
-            render_poses,
-            hwf,
-            K,
-            poses,
-            i_test,
+            training_state,
+            scene_data,
             loss,
             psnr,
         )
