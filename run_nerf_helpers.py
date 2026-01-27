@@ -24,6 +24,7 @@ This module contains the core building blocks for Neural Radiance Fields (NeRF):
    - mse2psnr: Convert MSE to Peak Signal-to-Noise Ratio
    - to8b: Convert float images to 8-bit for saving
 """
+
 import numpy as np
 import torch
 
@@ -37,13 +38,14 @@ mse2psnr = lambda x: -10.0 * torch.log(x) / torch.log(torch.tensor([10.0], devic
 to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
 
 
-# Positional encoding (section 5.1)
-# This implements the gamma(p) function from the paper, which maps continuous input coordinates
-# to a higher dimensional space using high frequency functions. This helps the network learn
-# high-frequency variations in color and geometry.
+# Positional encoding (Section 5.1 of the paper)
+# This implements the γ(p) function from equation (4), which maps continuous input coordinates
+# to a higher dimensional space using high frequency functions. This enables the MLP to
+# represent high-frequency variations in color and geometry.
 #
-# The encoding is: gamma(p) = (sin(2^0πp), cos(2^0πp), sin(2^1πp), cos(2^1πp), ..., sin(2^(L-1)πp), cos(2^(L-1)πp))
-# where L is the number of frequency bands (multires hyperparameter)
+# The encoding is: γ(p) = (sin(2^0·π·p), cos(2^0·π·p), sin(2^1·π·p), cos(2^1·π·p), ..., sin(2^(L-1)·π·p), cos(2^(L-1)·π·p))
+# where L is the number of frequency bands (multires hyperparameter).
+# According to the paper: L=10 for spatial position x, and L=4 for viewing direction d.
 class Embedder:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -51,7 +53,9 @@ class Embedder:
 
     def create_embedding_fn(self):
         embed_fns = []
-        d = self.kwargs["input_dims"]  # 3 for position (x,y,z) or viewing direction (θ,φ)
+        d = self.kwargs[
+            "input_dims"
+        ]  # Always 3: for position (x,y,z) or viewing direction as 3D Cartesian unit vector d
         out_dim = 0
 
         # Option to include the original input along with the encoded version
@@ -71,12 +75,14 @@ class Embedder:
             freq_bands = torch.linspace(2.0**0.0, 2.0**max_freq, steps=n_freqs)
 
         # For each frequency band, apply both sin and cos
-        # This creates: [sin(2^0*x), cos(2^0*x), sin(2^1*x), cos(2^1*x), ...]
+        # FIXME: Ask Claude to explain how each variable in the formula maps to code, and if freq=freq_val: p_fn(2.0 * np.pi * freq * x) should be freq=freq_val: p_fn(2.0 ** (some_var) * np.pi * freq * x), in the loop below.
+        # This creates: [sin(2^0*π*x), cos(2^0*π*x), sin(2^1*π*x), cos(2^1*π*x), ...]
+        # Formula from paper equation (4): γ(p) = (sin(2^0πp), cos(2^0πp), ..., sin(2^(L-1)πp), cos(2^(L-1)πp))
         # We convert freq to float to avoid device issues (scalars work on any device)
         for freq in freq_bands:
             freq_val = freq.item()
             for p_fn in self.kwargs["periodic_fns"]:  # [sin, cos]
-                embed_fns.append(lambda x, p_fn=p_fn, freq=freq_val: p_fn(x * freq))
+                embed_fns.append(lambda x, p_fn=p_fn, freq=freq_val: p_fn(2.0 * np.pi * freq * x))
                 out_dim += d  # Each periodic function adds d dimensions
 
         self.embed_fns = embed_fns
@@ -125,16 +131,22 @@ class NeRF(nn.Module):
     """
     Neural Radiance Field (NeRF) MLP architecture.
 
-    This implements the network F_Theta described in Section 3 of the paper.
-    The network takes as input a 5D coordinate (position x,y,z and viewing direction theta,phi)
-    and outputs volume density sigma and RGB color c.
+    This implements the network F_Θ described in Section 3 of the paper.
+    The network takes as input a 5D coordinate (spatial position x=(x,y,z) and viewing
+    direction d as a 3D Cartesian unit vector) and outputs volume density σ and view-dependent
+    RGB color c = (r,g,b).
 
-    Architecture details from paper (Section 3, Figure 3):
-    - 8 fully-connected layers (D=8), 256 channels per layer (W=256)
-    - Skip connection at layer 5 (concatenates input with intermediate features)
-    - Position encoding applied separately to (x,y,z) and (theta,phi)
-    - Density sigma depends only on position (x,y,z)
-    - RGB color c depends on both position and viewing direction
+    Architecture details from paper (Section 3, Appendix A - Figure 7):
+    - 8 fully-connected layers (D=8) with ReLU activations, 256 channels per layer (W=256)
+    - Skip connection at layer 5 (index 4): concatenates positionally encoded input with layer 4 activations
+    - Positional encoding γ(·) applied separately to position x (with L=10) and direction d (with L=4)
+    - Volume density σ depends only on position x (view-independent, ensures multiview consistency)
+    - A 256-D feature vector is concatenated with encoded viewing direction γ(d)
+    - One additional 128-channel fully-connected ReLU layer processes the combined features
+    - Final layer outputs view-dependent RGB color c (enables modeling of specular reflections)
+
+    The network computes: F_Θ(γ(x), γ(d)) = (c, σ)
+    where the representation is multiview-consistent by restricting σ = f(γ(x)) only.
     """
 
     def __init__(self, depth=8, width=256, input_ch=3, input_ch_views=3, output_ch=4, skips=None, use_viewdirs=False):
@@ -189,10 +201,16 @@ class NeRF(nn.Module):
         """
         Forward pass through the NeRF network.
 
-        Input format: concatenated [positionally_encoded_position, positionally_encoded_viewing_direction]
+        The input x contains concatenated positionally encoded coordinates:
+        x = [γ(x), γ(d)] where γ is the positional encoding function from Section 5.1.
+
+        Args:
+            x: [batch, input_ch + input_ch_views] Concatenated encoded position and viewing direction
 
         Returns:
-            outputs: [batch, 4] tensor containing [R, G, B, sigma] where sigma is volume density
+            outputs: [batch, 4] tensor containing [R, G, B, σ] where:
+                     R, G, B ∈ [0,1] are color channels (after sigmoid activation)
+                     σ ≥ 0 is the volume density (after ReLU activation)
         """
         # Split input into position and viewing direction components
         input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
@@ -261,23 +279,28 @@ class NeRF(nn.Module):
 # Ray helpers
 def get_rays(image_height, image_width, focal, c2w):
     """
-    Generate ray origins and directions for all pixels in an image.
+    Generate ray origins and directions for all pixels in an image using pinhole camera model.
 
-    This function implements the camera model to cast rays through each pixel.
-    Rays are defined parametrically as: r(t) = o + td, where:
-    - o is the ray origin (camera center)
-    - d is the ray direction (unit vector)
-    - t is the distance along the ray
+    This function implements the perspective camera ray generation. Each pixel corresponds to
+    a ray in 3D space defined parametrically as: r(t) = o + t·d, where:
+    - o is the ray origin (camera center in world coordinates)
+    - d is the ray direction (unit vector in world coordinates)
+    - t ≥ 0 is the distance along the ray from the origin
 
     Args:
         image_height: Image height in pixels (H in paper notation)
         image_width: Image width in pixels (W in paper notation)
-        focal: Camera intrinsic matrix [3x3] containing focal length and principal point (K in paper)
-        c2w: Camera-to-world transformation matrix [3x4] (extrinsics)
+        focal: Camera intrinsic matrix K [3x3] containing:
+               K = [[fx,  0, cx],
+                    [ 0, fy, cy],
+                    [ 0,  0,  1]]
+               where (fx, fy) are focal lengths and (cx, cy) is the principal point
+        c2w: Camera-to-world transformation matrix [3x4] (extrinsic parameters)
+             Transforms points from camera space to world space
 
     Returns:
         rays_o: [H, W, 3] Ray origins (all equal to camera center in world coordinates)
-        rays_d: [H, W, 3] Ray directions in world coordinates
+        rays_d: [H, W, 3] Ray directions in world coordinates (not normalized)
     """
     # Create pixel coordinate grid
     # Determine device from c2w matrix
@@ -308,18 +331,18 @@ def get_rays_np(image_height, image_width, focal, c2w):
     """
     Generate ray origins and directions for all pixels in an image (NumPy version).
 
-    This is the NumPy equivalent of get_rays(), used for preprocessing and batching.
-    Implements the same camera model to cast rays through each pixel.
+    This is the NumPy equivalent of get_rays(), used for preprocessing and batching
+    during data loading. Implements the same pinhole camera model.
 
     Args:
-        image_height: Image height in pixels
-        image_width: Image width in pixels
-        focal: Camera intrinsic matrix [3x3] containing focal length and principal point
-        c2w: Camera-to-world transformation matrix [3x4] (extrinsics)
+        image_height: Image height in pixels (H)
+        image_width: Image width in pixels (W)
+        focal: Camera intrinsic matrix K [3x3] containing focal lengths and principal point
+        c2w: Camera-to-world transformation matrix [3x4] (extrinsic parameters)
 
     Returns:
-        rays_o: [H, W, 3] Ray origins (all equal to camera center in world coordinates)
-        rays_d: [H, W, 3] Ray directions in world coordinates
+        rays_o: [H, W, 3] Ray origins in world coordinates (NumPy array)
+        rays_d: [H, W, 3] Ray directions in world coordinates (NumPy array, not normalized)
     """
     i, j = np.meshgrid(
         np.arange(image_width, dtype=np.float32), np.arange(image_height, dtype=np.float32), indexing="xy"
@@ -338,34 +361,39 @@ def ndc_rays(image_height, image_width, focal, near, rays_o, rays_d):
     """
     Transform rays from world coordinates to Normalized Device Coordinates (NDC).
 
-    This transformation is used for forward-facing scenes (LLFF dataset) to better handle
-    unbounded scenes. NDC space normalizes the viewing frustum to a canonical coordinate
-    system where depth is more uniformly distributed.
+    This transformation is described in Appendix C of the paper and is used specifically
+    for forward-facing scenes (like those in the LLFF dataset) to better handle unbounded
+    scenes. NDC space normalizes the viewing frustum into a canonical coordinate system
+    where:
+    - The camera looks down the -Z axis
+    - The viewing frustum is mapped to a unit cube [-1,1]³
+    - Depth is parameterized by disparity (inverse depth) rather than linear depth
+    - The near plane maps to depth = 1, and infinity maps to depth = -1
 
-    The transformation:
-    1. Shifts ray origins to the near plane
-    2. Projects rays into NDC space using perspective projection
-    3. Remaps depth so that the near plane maps to 1 and infinity maps to -1
+    The transformation consists of three steps:
+    1. Shift ray origins to the near plane: o' = o + t_near·d where t_near = -(near + o_z)/d_z
+    2. Apply perspective projection to X and Y coordinates
+    3. Reparameterize depth to use disparity (1/depth) for better sampling distribution
 
-    This is particularly useful for:
-    - Forward-facing scenes with unbounded backgrounds
-    - Improving sampling efficiency in depth
-    - Better numerical stability for scenes with large depth ranges
+    Benefits for forward-facing captures:
+    - Handles unbounded backgrounds (depth → ∞) naturally
+    - More uniform sampling distribution across the depth range
+    - Better numerical stability for scenes with large depth variation
+    - Matches the coordinate system used by Local Light Field Fusion (LLFF)
 
-    Reference: This follows the NDC formulation from the NeRF paper supplement and
-    Local Light Field Fusion (LLFF) paper.
+    Reference: NeRF paper Appendix C and LLFF paper [Mildenhall et al. 2019].
 
     Args:
-        image_height: Image height in pixels
-        image_width: Image width in pixels
-        focal: Focal length of the camera
-        near: Near plane distance
+        image_height: Image height H in pixels
+        image_width: Image width W in pixels
+        focal: Focal length f of the camera
+        near: Near plane distance n
         rays_o: [N_rays, 3] Ray origins in world coordinates
         rays_d: [N_rays, 3] Ray directions in world coordinates
 
     Returns:
-        rays_o: [N_rays, 3] Ray origins in NDC coordinates
-        rays_d: [N_rays, 3] Ray directions in NDC coordinates
+        rays_o: [N_rays, 3] Transformed ray origins in NDC space
+        rays_d: [N_rays, 3] Transformed ray directions in NDC space
     """
     # Shift ray origins to near plane
     t = -(near + rays_o[..., 2]) / rays_d[..., 2]

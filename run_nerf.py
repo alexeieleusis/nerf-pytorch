@@ -399,30 +399,45 @@ def create_nerf(args):
 
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
     """
-    Transforms model's predictions to semantically meaningful values using volume rendering.
+    Transforms model's predictions to semantically meaningful values using classical volume rendering.
 
-    This implements the classical volume rendering integral described in Section 4:
-    C(r) = ∫ T(t) · sigma(t) · c(t) dt
+    This implements the volume rendering equation from Section 4 (Equation 3) of the paper.
+    The expected color C(r) of camera ray r(t) = o + t·d is computed as:
+
+        C(r) = ∫[t_n to t_f] T(t)·σ(r(t))·c(r(t),d) dt
 
     where:
     - C(r) is the expected color along ray r
-    - T(t) = exp(-∫₀ᵗ sigma(s)ds) is the transmittance (probability ray travels to t without hitting anything)
-    - sigma(t) is the volume density at point t
-    - c(t) is the RGB color at point t
+    - T(t) = exp(-∫[t_n to t] σ(r(s))ds) is the accumulated transmittance from t_n to t
+      (i.e., the probability that the ray travels from t_n to t without hitting any particle)
+    - σ(r(t)) is the volume density at location r(t) along the ray
+    - c(r(t),d) is the view-dependent emitted radiance at location r(t) in direction d
 
     The continuous integral is approximated using quadrature (numerical integration)
-    with stratified sampling along the ray.
+    as described in Equation 3:
+
+        Ĉ(r) = Σ[i=1 to N] T_i · (1 - exp(-σ_i·δ_i)) · c_i
+
+    where:
+    - T_i = exp(-Σ[j=1 to i-1] σ_j·δ_j) is the discrete accumulated transmittance
+    - α_i = 1 - exp(-σ_i·δ_i) is the alpha (opacity) of sample i
+    - δ_i = t_{i+1} - t_i is the distance between adjacent samples
+    - w_i = T_i · α_i represents the contribution weight of sample i
 
     Args:
-        raw: [num_rays, num_samples along ray, 4]. Prediction from model (RGB + sigma).
-        z_vals: [num_rays, num_samples along ray]. Sample distances along each ray.
-        rays_d: [num_rays, 3]. Direction of each ray.
+        raw: [N_rays, N_samples, 4] Raw network output (RGB + density σ before activation)
+        z_vals: [N_rays, N_samples] Integration sample locations t_i along each ray
+        rays_d: [N_rays, 3] Ray direction vectors (used to compute distances δ_i)
+        raw_noise_std: Std dev of noise added to σ for regularization (default 0, used in training)
+        white_bkgd: If True, assume white background (add 1-acc to RGB)
+        pytest: If True, use fixed random seed for testing
+
     Returns:
-        rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
-        disp_map: [num_rays]. Disparity map (inverse depth).
-        acc_map: [num_rays]. Accumulated opacity (sum of weights).
-        weights: [num_rays, num_samples]. Weights assigned to each sampled color.
-        depth_map: [num_rays]. Expected distance to surface.
+        rgb_map: [N_rays, 3] Estimated RGB color Ĉ(r) for each ray
+        disp_map: [N_rays] Disparity map (inverse of expected depth)
+        acc_map: [N_rays] Accumulated opacity Σw_i along each ray (in [0,1])
+        weights: [N_rays, N_samples] Weight w_i assigned to each sampled color
+        depth_map: [N_rays] Expected distance to surface E[t] = Σw_i·t_i
     """
     # Function to convert raw density to alpha (opacity) using exponential
     # Formula: alpha = 1 - exp(-sigma·delta), where delta is the distance between samples
@@ -1169,23 +1184,30 @@ def compute_training_loss(rgb, target_s, extras):
     """
     Compute photometric training loss from rendered RGB and ground truth.
 
-    The loss function is a simple mean squared error (MSE) between rendered pixels
-    and ground truth pixels. When using hierarchical sampling, the loss includes
-    contributions from both the coarse and fine networks:
+    This implements the loss function from Section 5.3 (Equation 6) of the paper.
+    The loss is the total squared error between rendered and true pixel colors:
 
-    L = MSE(C_fine, C_gt) + MSE(C_coarse, C_gt)
+        L = Σ[r∈R] [ ||Ĉ_c(r) - C(r)||² + ||Ĉ_f(r) - C(r)||² ]
 
-    This dual loss helps train both networks and ensures the coarse network provides
-    useful guidance for hierarchical sampling.
+    where:
+    - R is the set of rays in each batch (typically 4096 rays)
+    - C(r) is the ground truth RGB color for ray r
+    - Ĉ_c(r) is the coarse network's rendered color
+    - Ĉ_f(r) is the fine network's rendered color (final output)
+
+    The dual loss serves two purposes:
+    1. Trains the fine network to produce high-quality final renderings
+    2. Trains the coarse network to provide useful density estimates for
+       hierarchical sampling (guiding where the fine network should sample)
 
     Args:
-        rgb: [N_rays, 3] Rendered RGB from fine network
-        target_s: [N_rays, 3] Ground truth RGB values
-        extras: Dictionary potentially containing 'rgb0' (coarse network output)
+        rgb: [N_rays, 3] Rendered RGB Ĉ_f(r) from fine network
+        target_s: [N_rays, 3] Ground truth RGB values C(r)
+        extras: Dictionary potentially containing 'rgb0' (coarse network output Ĉ_c(r))
 
     Returns:
-        loss: Combined MSE loss (fine + coarse if hierarchical)
-        psnr: Peak Signal-to-Noise Ratio in dB (quality metric)
+        loss: Combined MSE loss (fine + coarse if using hierarchical sampling)
+        psnr: Peak Signal-to-Noise Ratio in dB (quality metric for evaluation)
     """
     img_loss = img2mse(rgb, target_s)
     loss = img_loss
@@ -1200,22 +1222,28 @@ def compute_training_loss(rgb, target_s, extras):
 
 def update_learning_rate(optimizer, args, global_step):
     """
-    Update learning rate with exponential decay.
+    Update learning rate with exponential decay as described in Section 5.3.
 
     The learning rate follows an exponential decay schedule:
-    lr(t) = lr_init × (0.1)^(t / decay_steps)
+        lr(t) = lr_init × (decay_rate)^(t / decay_steps)
 
-    where decay_steps = lrate_decay × 1000 (typically 250,000 steps).
+    where:
+    - lr_init = 5×10⁻⁴ (initial learning rate)
+    - decay_rate = 0.1
+    - decay_steps = lrate_decay × 1000 (default: 250,000 steps)
 
-    This gradual learning rate reduction helps:
-    1. Make large updates early in training for rapid convergence
-    2. Make fine-grained updates later for detail refinement
-    3. Stabilize training as the model approaches convergence
+    This causes the learning rate to decay from 5×10⁻⁴ to 5×10⁻⁵ over the
+    course of optimization, as specified in the paper.
+
+    Benefits of exponential decay:
+    1. Large updates early in training enable rapid initial convergence
+    2. Smaller updates later allow fine-grained detail refinement
+    3. Improved stability as the model approaches convergence
 
     Args:
-        optimizer: PyTorch Adam optimizer
-        args: Arguments containing lrate (initial rate) and lrate_decay
-        global_step: Current training iteration
+        optimizer: PyTorch Adam optimizer (uses β₁=0.9, β₂=0.999, ε=10⁻⁷ from Section 5.3)
+        args: Arguments containing lrate (initial rate) and lrate_decay factor
+        global_step: Current training iteration t
     """
     decay_rate = 0.1
     decay_steps = args.lrate_decay * 1000
@@ -1427,6 +1455,8 @@ def train():
     images, poses, rays_rgb = _prepare_training_data(use_batching, images, poses, rays_rgb)
 
     # Training loop setup
+    # Paper (Section 5.3) reports 100-300k iterations depending on scene complexity
+    # This implementation uses 200k iterations as a reasonable default
     n_iters = 200000 + 1
     print("Begin")
     print("TRAIN views are", i_train)
