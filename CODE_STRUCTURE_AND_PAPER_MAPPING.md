@@ -411,3 +411,124 @@ python run_nerf.py --config configs/lego.txt --render_only
    - Chunk rays into batches (`--chunk`, `--netchunk`)
    - Process rays and network queries in smaller batches
    - Prevents OOM on consumer GPUs
+
+---
+
+## Call Sequence Diagram: `train()` Entry Point
+
+The diagram below traces the complete call chain starting from `train()`, with each node annotated to its corresponding paper section.
+
+```mermaid
+sequenceDiagram
+    participant T as train()<br/>[run_nerf.py]
+    participant LD as load_dataset()<br/>[§ Data Setup]
+    participant SL as setup_logging_dirs()<br/>[§ 5.3 Impl Details]
+    participant CN as create_nerf()<br/>[§ 3 + § 5.1 + § 5.3]
+    participant GE as get_embedder()<br/>[§ 5.1 Positional Encoding]
+    participant EM as Embedder.embed()<br/>[§ 5.1 γ(p) function]
+    participant NF as NeRF (coarse + fine)<br/>[§ 3 Network F_Θ]
+    participant PRB as prepare_ray_batching()<br/>[§ 5.3 Batching]
+    participant GRN as get_rays_np()<br/>[§ 4 Ray Generation]
+    participant SRB as sample_ray_batch()<br/>[§ 5.3 Ray Sampling]
+    participant GR as get_rays()<br/>[§ 4 Ray Generation]
+    participant R as render()<br/>[§ 4 Volume Rendering]
+    participant NDC as ndc_rays()<br/>[Appendix C NDC]
+    participant BR as batchify_rays()<br/>[§ 5.3 Memory Chunks]
+    participant RR as render_rays()<br/>[§ 4 + § 5.2]
+    participant CSS as _create_stratified_samples()<br/>[§ 4 Stratified Sampling]
+    participant RN as run_network()<br/>[§ 5.1 + § 3 Query]
+    participant BF as batchify(fn)<br/>[§ 5.3 netchunk]
+    participant NFF as NeRF.forward()<br/>[§ 3 F_Θ(γ(x),γ(d))]
+    participant R2O as raw2outputs()<br/>[§ 4 Eq. 3 Quadrature]
+    participant PHS as _perform_hierarchical_sampling()<br/>[§ 5.2 Fine Sampling]
+    participant SPDF as sample_pdf()<br/>[§ 5.2 Inverse CDF]
+    participant CTL as compute_training_loss()<br/>[§ 5.3 Eq. 6 Loss]
+    participant ULR as update_learning_rate()<br/>[§ 5.3 Exp Decay]
+    participant HPL as _handle_periodic_logging()<br/>[§ 5.3 Checkpointing]
+
+    T->>LD: load dataset (LLFF/Blender/etc.)
+    LD-->>T: images, poses, hwf, render_poses, splits, near, far
+
+    T->>SL: create log dirs, save args/config
+
+    T->>CN: instantiate networks + optimizer
+    CN->>GE: get_embedder(multires=10) for position
+    GE-->>CN: embed_fn, input_ch=63
+    CN->>GE: get_embedder(multires=4) for view dirs
+    GE-->>CN: embeddirs_fn, input_ch_views=27
+    CN->>NF: NeRF(coarse) — 8 layers, 256 ch, skip@4
+    CN->>NF: NeRF(fine) — same arch (if N_importance > 0)
+    CN-->>T: render_kwargs_train/test, start, optimizer
+
+    T->>PRB: pre-compute rays for all training images
+    PRB->>GRN: get_rays_np(H, W, K, pose) per image
+    GRN-->>PRB: rays_o, rays_d [H, W, 3]
+    PRB-->>T: rays_rgb [N_rays, 3, 3] (shuffled)
+
+    loop 200 000 training iterations
+        T->>SRB: sample_ray_batch(use_batching, ...)
+        alt use_batching=True
+            SRB-->>T: batch_rays [2,N_rand,3], target_s [N_rand,3]
+        else no_batching flag
+            SRB->>GR: get_rays(H, W, K, pose)
+            GR-->>SRB: rays_o, rays_d
+            SRB-->>T: batch_rays, target_s
+        end
+
+        T->>R: render(H, W, K, rays=batch_rays, ...)
+        R->>NDC: ndc_rays(...) — LLFF scenes only
+        NDC-->>R: rays_o, rays_d in NDC space
+        R->>BR: batchify_rays(rays_combined, chunk)
+        BR->>RR: render_rays(ray_batch[i:i+chunk])
+
+        Note over RR: §4 Coarse pass
+        RR->>CSS: _create_stratified_samples(near, far, N_samples=64)
+        CSS-->>RR: z_vals [N_rays, 64]
+        RR->>RN: run_network(pts, viewdirs, coarse_fn)
+        RN->>EM: embed_fn(pts_flat) → γ(x)
+        EM-->>RN: encoded position [N, 63]
+        RN->>EM: embeddirs_fn(dirs_flat) → γ(d)
+        EM-->>RN: encoded dirs [N, 27]
+        RN->>BF: batchify(network_fn, netchunk)
+        BF->>NFF: NeRF.forward(embedded) in chunks
+        NFF-->>BF: raw [N, 4]  (RGB + σ)
+        BF-->>RN: outputs_flat
+        RN-->>RR: raw [N_rays, 64, 4]
+        RR->>R2O: raw2outputs(raw, z_vals, rays_d)
+        Note over R2O: α=1−exp(−σδ), T=∏(1−α), C=Σw·c
+        R2O-->>RR: rgb_map, disp_map, acc_map, weights, depth_map
+
+        opt N_importance > 0 (hierarchical sampling)
+            Note over RR: §5.2 Fine pass
+            RR->>PHS: _perform_hierarchical_sampling(z_vals, weights, N_importance=128)
+            PHS->>SPDF: sample_pdf(z_vals_mid, weights[1:-1], N_importance)
+            Note over SPDF: Build PDF→CDF, invert via binary search
+            SPDF-->>PHS: z_samples [N_rays, 128]
+            PHS-->>RR: z_vals_combined [N_rays, 192], z_samples
+            RR->>RN: run_network(pts_fine, viewdirs, fine_fn)
+            RN->>BF: batchify(network_fine, netchunk)
+            BF->>NFF: NeRF.forward(embedded)
+            NFF-->>BF: raw [N, 4]
+            BF-->>RN: outputs_flat
+            RN-->>RR: raw [N_rays, 192, 4]
+            RR->>R2O: raw2outputs(raw, z_vals_combined, rays_d)
+            R2O-->>RR: rgb_map, disp_map, acc_map, weights (fine)
+        end
+
+        RR-->>BR: {rgb_map, disp_map, acc_map, rgb0, disp0, acc0, z_std}
+        BR-->>R: all_ret (concatenated across chunks)
+        R-->>T: [rgb_map, disp_map, acc_map, extras]
+
+        T->>CTL: compute_training_loss(rgb, target_s, extras)
+        Note over CTL: L = MSE(Ĉ_f, C) + MSE(Ĉ_c, C)  [Eq. 6]
+        CTL-->>T: loss, psnr
+
+        T->>T: loss.backward(); optimizer.step()
+
+        T->>ULR: update_learning_rate(optimizer, args, global_step)
+        Note over ULR: lr = lr₀ × 0.1^(t/decay_steps)
+
+        T->>HPL: _handle_periodic_logging(i, ...)
+        Note over HPL: save checkpoint / render video / render testset
+    end
+```
