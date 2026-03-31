@@ -1,32 +1,72 @@
 import os
+from typing import Any, List, Optional, Tuple
 
 import imageio
 import numpy as np
+import numpy.typing as npt
 
 ########## Slightly modified version of LLFF data loading code
 ##########  see https://github.com/Fyusion/LLFF for original
 
 
-def _minify(basedir, factors=None, resolutions=None):
+def _check_if_minify_needed(basedir: str, factors: List[int], resolutions: List[List[int]]) -> bool:
+    """Check if any minified image directories are missing."""
+    for r in factors:
+        imgdir = os.path.join(basedir, f"images_{r}")
+        if not os.path.exists(imgdir):
+            return True
+    for r in resolutions:
+        imgdir = os.path.join(basedir, f"images_{r[1]}x{r[0]}")
+        if not os.path.exists(imgdir):
+            return True
+    return False
+
+
+def _process_resolution(basedir: str, r: int | List[int], imgdir_orig: str, imgs: List[str], wd: str) -> None:
+    """Process images for a single resolution."""
+    import glob
+    import shutil
+    from subprocess import check_output
+
+    if isinstance(r, int):
+        name = f"images_{r}"
+        resizearg = f"{100.0 / r}%"
+    else:
+        name = f"images_{r[1]}x{r[0]}"
+        resizearg = f"{r[1]}x{r[0]}"
+
+    imgdir = os.path.join(basedir, name)
+    if os.path.exists(imgdir):
+        return
+
+    print("Minifying", r, basedir)
+
+    os.makedirs(imgdir)
+    for f in glob.glob(os.path.join(imgdir_orig, "*")):
+        shutil.copy2(f, imgdir)
+
+    ext = imgs[0].split(".")[-1]
+    args = ["mogrify", "-resize", resizearg, "-format", "png", f"*.{ext}"]
+    print(" ".join(args))
+    os.chdir(imgdir)
+    check_output(args, shell=False)  # noqa: S603
+    os.chdir(wd)
+
+    if ext != "png":
+        for f in glob.glob(os.path.join(imgdir, f"*.{ext}")):
+            os.remove(f)
+        print("Removed duplicates")
+    print("Done")
+
+
+def _minify(basedir: str, factors: Optional[List[int]] = None, resolutions: Optional[List[List[int]]] = None) -> None:
     if factors is None:
         factors = []
     if resolutions is None:
         resolutions = []
-    needtoload = False
-    for r in factors:
-        imgdir = os.path.join(basedir, f"images_{r}")
-        if not os.path.exists(imgdir):
-            needtoload = True
-    for r in resolutions:
-        imgdir = os.path.join(basedir, f"images_{r[1]}x{r[0]}")
-        if not os.path.exists(imgdir):
-            needtoload = True
-    if not needtoload:
-        return
 
-    import glob
-    import shutil
-    from subprocess import check_output
+    if not _check_if_minify_needed(basedir, factors, resolutions):
+        return
 
     imgdir = os.path.join(basedir, "images")
     imgs = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir))]
@@ -36,37 +76,19 @@ def _minify(basedir, factors=None, resolutions=None):
     wd = os.getcwd()
 
     for r in factors + resolutions:
-        if isinstance(r, int):
-            name = f"images_{r}"
-            resizearg = f"{100.0 / r}%"
-        else:
-            name = f"images_{r[1]}x{r[0]}"
-            resizearg = f"{r[1]}x{r[0]}"
-        imgdir = os.path.join(basedir, name)
-        if os.path.exists(imgdir):
-            continue
-
-        print("Minifying", r, basedir)
-
-        os.makedirs(imgdir)
-        for f in glob.glob(os.path.join(imgdir_orig, "*")):
-            shutil.copy2(f, imgdir)
-
-        ext = imgs[0].split(".")[-1]
-        args = ["mogrify", "-resize", resizearg, "-format", "png", f"*.{ext}"]
-        print(" ".join(args))
-        os.chdir(imgdir)
-        check_output(args)
-        os.chdir(wd)
-
-        if ext != "png":
-            for f in glob.glob(os.path.join(imgdir, f"*.{ext}")):
-                os.remove(f)
-            print("Removed duplicates")
-        print("Done")
+        _process_resolution(basedir, r, imgdir_orig, imgs, wd)
 
 
-def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
+def _load_data(
+    basedir: str,
+    factor: Optional[int] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    load_imgs: bool = True,
+) -> (
+    Tuple[npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]]]
+    | Tuple[npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]]]
+):
 
     poses_arr = np.load(os.path.join(basedir, "poses_bounds.npy"))
     poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
@@ -128,11 +150,13 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     return poses, bds, imgs
 
 
-def normalize(x):
+def normalize(x: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[Any]]:
     return x / np.linalg.norm(x)
 
 
-def viewmatrix(z, up, pos):
+def viewmatrix(
+    z: npt.NDArray[np.floating[Any]], up: npt.NDArray[np.floating[Any]], pos: npt.NDArray[np.floating[Any]]
+) -> npt.NDArray[np.floating[Any]]:
     vec2 = normalize(z)
     vec1_avg = up
     vec0 = normalize(np.cross(vec1_avg, vec2))
@@ -141,12 +165,12 @@ def viewmatrix(z, up, pos):
     return m
 
 
-def ptstocam(pts, c2w):
+def ptstocam(pts: npt.NDArray[np.floating[Any]], c2w: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[Any]]:
     tt = np.matmul(c2w[:3, :3].T, (pts - c2w[:3, 3])[..., np.newaxis])[..., 0]
     return tt
 
 
-def poses_avg(poses):
+def poses_avg(poses: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[Any]]:
 
     hwf = poses[0, :3, -1:]
 
@@ -158,7 +182,15 @@ def poses_avg(poses):
     return c2w
 
 
-def render_path_spiral(c2w, up, rads, focal, zrate, rots, n):
+def render_path_spiral(
+    c2w: npt.NDArray[np.floating[Any]],
+    up: npt.NDArray[np.floating[Any]],
+    rads: npt.NDArray[np.floating[Any]],
+    focal: float,
+    zrate: float,
+    rots: int,
+    n: int | float,
+) -> List[npt.NDArray[np.floating[Any]]]:
     render_poses = []
     rads = np.array([*list(rads), 1.0])
     hwf = c2w[:, 4:5]
@@ -170,7 +202,7 @@ def render_path_spiral(c2w, up, rads, focal, zrate, rots, n):
     return render_poses
 
 
-def recenter_poses(poses):
+def recenter_poses(poses: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.floating[Any]]:
 
     poses_ = poses + 0
     bottom = np.reshape([0, 0, 0, 1.0], [1, 4])
@@ -188,7 +220,9 @@ def recenter_poses(poses):
 #####################
 
 
-def spherify_poses(poses, bds):
+def spherify_poses(
+    poses: npt.NDArray[np.floating[Any]], bds: npt.NDArray[np.floating[Any]]
+) -> Tuple[npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]]]:
 
     p34_to_44 = lambda p: np.concatenate([p, np.tile(np.reshape(np.eye(4)[-1, :], [1, 1, 4]), [p.shape[0], 1, 1])], 1)
 
@@ -248,7 +282,20 @@ def spherify_poses(poses, bds):
     return poses_reset, new_poses, bds
 
 
-def load_llff_data(basedir, factor=8, recenter=True, bd_factor=0.75, spherify=False, path_zflat=False):
+def load_llff_data(
+    basedir: str,
+    factor: int = 8,
+    recenter: bool = True,
+    bd_factor: float = 0.75,
+    spherify: bool = False,
+    path_zflat: bool = False,
+) -> Tuple[
+    npt.NDArray[np.floating[Any]],
+    npt.NDArray[np.floating[Any]],
+    npt.NDArray[np.floating[Any]],
+    npt.NDArray[np.floating[Any]],
+    int,
+]:
 
     poses, bds, imgs = _load_data(basedir, factor=factor)  # factor=8 downsamples original imgs by 8x
     print("Loaded", basedir, bds.min(), bds.max())
@@ -297,7 +344,7 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=0.75, spherify=Fa
             c2w_path[:3, 3] = c2w_path[:3, 3] + zloc * c2w_path[:3, 2]
             rads[2] = 0.0
             n_rots = 1
-            n_views /= 2
+            n_views //= 2
 
         # Generate poses for spiral path
         render_poses = render_path_spiral(c2w_path, up, rads, focal, zrate=0.5, rots=n_rots, n=n_views)

@@ -1,9 +1,11 @@
 import json
 import os
+from typing import Any, List, Tuple
 
 import cv2
 import imageio
 import numpy as np
+import numpy.typing as npt
 import torch
 
 trans_t = lambda t: torch.Tensor([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, t], [0, 0, 0, 1]]).float()
@@ -23,7 +25,7 @@ rot_theta = lambda th: torch.Tensor([
 ]).float()
 
 
-def pose_spherical(theta, phi, radius):
+def pose_spherical(theta: float, phi: float, radius: float) -> torch.Tensor:
     c2w = trans_t(radius)
     c2w = rot_phi(phi / 180.0 * np.pi) @ c2w
     c2w = rot_theta(theta / 180.0 * np.pi) @ c2w
@@ -31,38 +33,51 @@ def pose_spherical(theta, phi, radius):
     return c2w
 
 
-def load_linemod_dataset(basedir, half_res=False, testskip=1):
+def load_linemod_dataset(
+    basedir: str, half_res: bool = False, testskip: int = 1
+) -> Tuple[
+    npt.NDArray[np.floating[Any]],
+    npt.NDArray[np.floating[Any]],
+    torch.Tensor,
+    List[float],
+    Any,
+    List[npt.NDArray[np.integer[Any]]],
+    npt.NDArray[np.floating[Any]],
+    npt.NDArray[np.floating[Any]],
+]:
     splits = ["train", "val", "test"]
-    metas = {}
+    metas: dict[str, Any] = {}
     for s in splits:
         with open(os.path.join(basedir, f"transforms_{s}.json")) as fp:
             metas[s] = json.load(fp)
 
-    all_imgs = []
-    all_poses = []
+    all_imgs: List[npt.NDArray[np.floating[Any]]] = []
+    all_poses: List[npt.NDArray[np.floating[Any]]] = []
     counts = [0]
     for s in splits:
         meta = metas[s]
-        imgs = []
-        poses = []
+        imgs_list: List[npt.NDArray[Any]] = []
+        poses_list: List[npt.NDArray[Any]] = []
         skip = 1 if s == "train" or testskip == 0 else testskip
 
         for idx_test, frame in enumerate(meta["frames"][::skip]):
             fname = frame["file_path"]
             if s == "test":
                 print(f"{idx_test}th test frame: {fname}")
-            imgs.append(imageio.imread(fname))
-            poses.append(np.array(frame["transform_matrix"]))
-        imgs = (np.array(imgs) / 255.0).astype(np.float32)  # keep all 4 channels (RGBA)
-        poses = np.array(poses).astype(np.float32)
-        counts.append(counts[-1] + imgs.shape[0])
-        all_imgs.append(imgs)
-        all_poses.append(poses)
+            imgs_list.append(imageio.imread(fname))
+            poses_list.append(np.array(frame["transform_matrix"]))
+        imgs_arr: npt.NDArray[np.floating[Any]] = (np.array(imgs_list) / 255.0).astype(
+            np.float32
+        )  # keep all 4 channels (RGBA)
+        poses_arr: npt.NDArray[np.floating[Any]] = np.array(poses_list).astype(np.float32)
+        counts.append(counts[-1] + imgs_arr.shape[0])
+        all_imgs.append(imgs_arr)
+        all_poses.append(poses_arr)
 
     i_split = [np.arange(counts[i], counts[i + 1]) for i in range(3)]
 
-    imgs = np.concatenate(all_imgs, 0)
-    poses = np.concatenate(all_poses, 0)
+    imgs: npt.NDArray[np.floating[Any]] = np.concatenate(all_imgs, 0)
+    poses: npt.NDArray[np.floating[Any]] = np.concatenate(all_poses, 0)
 
     H, W = imgs[0].shape[:2]
     focal = float(meta["frames"][0]["intrinsic_matrix"][0][0])

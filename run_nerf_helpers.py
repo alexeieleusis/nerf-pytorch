@@ -25,7 +25,10 @@ This module contains the core building blocks for Neural Radiance Fields (NeRF):
    - to8b: Convert float images to 8-bit for saving
 """
 
+from typing import Any, Callable, List, Optional, Tuple
+
 import numpy as np
+import numpy.typing as npt
 import torch
 
 # torch.autograd.set_detect_anomaly(True)
@@ -47,24 +50,27 @@ to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
 # where L is the number of frequency bands (multires hyperparameter).
 # According to the paper: L=10 for spatial position x, and L=4 for viewing direction d.
 class Embedder:
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
+        self.embed_fns: List[Callable[[torch.Tensor], torch.Tensor]] = []
+        self.out_dim: int = 0
         self.create_embedding_fn()
 
-    def create_embedding_fn(self):
-        embed_fns = []
-        d = self.kwargs[
+    def create_embedding_fn(self) -> None:
+        embed_fns: List[Callable[[torch.Tensor], torch.Tensor]] = []
+        d: int = self.kwargs[
             "input_dims"
         ]  # Always 3: for position (x,y,z) or viewing direction as 3D Cartesian unit vector d
         out_dim = 0
 
         # Option to include the original input along with the encoded version
         if self.kwargs["include_input"]:
-            embed_fns.append(lambda x: x)
+            identity_fn: Callable[[torch.Tensor], torch.Tensor] = lambda x: x
+            embed_fns.append(identity_fn)
             out_dim += d
 
-        max_freq = self.kwargs["max_freq_log2"]  # L-1, where L is number of frequency bands
-        n_freqs = self.kwargs["num_freqs"]  # L, number of frequency bands
+        max_freq: int = self.kwargs["max_freq_log2"]  # L-1, where L is number of frequency bands
+        n_freqs: int = self.kwargs["num_freqs"]  # L, number of frequency bands
 
         # Create frequency bands: 2^0, 2^1, 2^2, ..., 2^(L-1)
         # Log sampling means we sample frequencies logarithmically
@@ -82,18 +88,21 @@ class Embedder:
         for freq in freq_bands:
             freq_val = freq.item()
             for p_fn in self.kwargs["periodic_fns"]:  # [sin, cos]
-                embed_fns.append(lambda x, p_fn=p_fn, freq=freq_val: p_fn(2.0 * np.pi * freq * x))
+                periodic_fn: Callable[[torch.Tensor], torch.Tensor] = lambda x, p_fn=p_fn, freq=freq_val: p_fn(
+                    2.0 * np.pi * freq * x
+                )
+                embed_fns.append(periodic_fn)
                 out_dim += d  # Each periodic function adds d dimensions
 
         self.embed_fns = embed_fns
         self.out_dim = out_dim
 
-    def embed(self, inputs):
+    def embed(self, inputs: torch.Tensor) -> torch.Tensor:
         # Apply all embedding functions and concatenate results
         return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
 
 
-def get_embedder(multires, i=0):
+def get_embedder(multires: int, i: int = 0) -> Tuple[Callable[[torch.Tensor], torch.Tensor], int]:
     """
     Factory function to create a positional encoding embedder.
 
@@ -122,7 +131,7 @@ def get_embedder(multires, i=0):
     }
 
     embedder_obj = Embedder(**embed_kwargs)
-    embed = lambda x, eo=embedder_obj: eo.embed(x)
+    embed: Callable[[torch.Tensor], torch.Tensor] = lambda x, eo=embedder_obj: eo.embed(x)
     return embed, embedder_obj.out_dim
 
 
@@ -149,7 +158,16 @@ class NeRF(nn.Module):
     where the representation is multiview-consistent by restricting σ = f(γ(x)) only.
     """
 
-    def __init__(self, depth=8, width=256, input_ch=3, input_ch_views=3, output_ch=4, skips=None, use_viewdirs=False):
+    def __init__(
+        self,
+        depth: int = 8,
+        width: int = 256,
+        input_ch: int = 3,
+        input_ch_views: int = 3,
+        output_ch: int = 4,
+        skips: Optional[List[int]] = None,
+        use_viewdirs: bool = False,
+    ) -> None:
         """
         Args:
             depth: Number of layers in the main MLP (default: 8, denoted as D in paper)
@@ -197,7 +215,7 @@ class NeRF(nn.Module):
             # Simple case: directly output RGB+density from position
             self.output_linear = nn.Linear(width, output_ch)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through the NeRF network.
 
@@ -245,7 +263,7 @@ class NeRF(nn.Module):
 
         return outputs
 
-    def load_weights_from_keras(self, weights):
+    def load_weights_from_keras(self, weights: List[npt.NDArray[np.floating[Any]]]) -> None:
         if not self.use_viewdirs:
             raise NotImplementedError("load_weights_from_keras is not implemented if use_viewdirs=False")
 
@@ -277,7 +295,9 @@ class NeRF(nn.Module):
 
 
 # Ray helpers
-def get_rays(image_height, image_width, focal, c2w):
+def get_rays(
+    image_height: int, image_width: int, focal: torch.Tensor, c2w: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Generate ray origins and directions for all pixels in an image using pinhole camera model.
 
@@ -327,7 +347,9 @@ def get_rays(image_height, image_width, focal, c2w):
     return rays_o, rays_d
 
 
-def get_rays_np(image_height, image_width, focal, c2w):
+def get_rays_np(
+    image_height: int, image_width: int, focal: npt.NDArray[np.floating[Any]], c2w: npt.NDArray[np.floating[Any]]
+) -> Tuple[npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]]]:
     """
     Generate ray origins and directions for all pixels in an image (NumPy version).
 
@@ -357,7 +379,9 @@ def get_rays_np(image_height, image_width, focal, c2w):
     return rays_o, rays_d
 
 
-def ndc_rays(image_height, image_width, focal, near, rays_o, rays_d):
+def ndc_rays(
+    image_height: int, image_width: int, focal: float, near: float, rays_o: torch.Tensor, rays_d: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Transform rays from world coordinates to Normalized Device Coordinates (NDC).
 
@@ -415,7 +439,9 @@ def ndc_rays(image_height, image_width, focal, near, rays_o, rays_d):
 
 
 # Hierarchical sampling (section 5.2)
-def sample_pdf(bins, weights, n_samples, det=False, pytest=False):
+def sample_pdf(
+    bins: torch.Tensor, weights: torch.Tensor, n_samples: int, det: bool = False, pytest: bool = False
+) -> torch.Tensor:
     """
     Hierarchical sampling using inverse transform sampling.
 
@@ -441,19 +467,38 @@ def sample_pdf(bins, weights, n_samples, det=False, pytest=False):
     Returns:
         samples: [N_rays, N_samples] New sample locations along each ray
     """
-    # Get pdf
+    # --- Stage 1: Build a probability density function (PDF) from the coarse weights ---
+    # The coarse network outputs a weight per bin that is proportional to how much
+    # volume density (and thus expected color contribution) is concentrated there.
+    # We add a small epsilon to avoid zero weights, which would cause division by zero
+    # and produce NaN values in the PDF.
     weights = weights + 1e-5  # prevent nans and ensure all weights are positive
-    pdf = weights / torch.sum(weights, -1, keepdim=True)  # Normalize to get probability distribution
-    cdf = torch.cumsum(pdf, -1)  # Cumulative distribution function
+    # Divide each weight by the total so the values sum to 1 across bins, making it a valid PDF.
+    pdf = weights / torch.sum(weights, -1, keepdim=True)
+
+    # --- Stage 2: Build the Cumulative Distribution Function (CDF) ---
+    # The CDF at position i is the sum of all PDF values up to and including i.
+    # It is a monotonically increasing function from 0 to 1.
+    # Example: if pdf = [0.1, 0.6, 0.3], then cdf = [0.1, 0.7, 1.0]
+    cdf = torch.cumsum(pdf, -1)
+    # Prepend a zero so the CDF starts at 0, making it span exactly [0, 1].
+    # This ensures every uniform sample u ∈ [0, 1] can be mapped to a bin.
+    # After cat: cdf = [0.0, 0.1, 0.7, 1.0] for the example above.
     cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)  # (batch, len(bins))
 
-    # Take uniform samples in [0, 1]
+    # --- Stage 3: Draw uniform random samples in [0, 1] ---
+    # These are the "query points" we will invert through the CDF.
+    # Each sample u represents a quantile: we want to find the bin depth t such that
+    # CDF(t) = u, which by construction samples bins proportionally to their weight.
+    u: torch.Tensor
     if det:
-        # Deterministic: evenly spaced samples
+        # Deterministic mode: evenly spaced quantiles across [0, 1].
+        # Used during evaluation/rendering for consistent, repeatable results.
         u = torch.linspace(0.0, 1.0, steps=n_samples, device=cdf.device)
         u = u.expand([*list(cdf.shape[:-1]), n_samples])
     else:
-        # Stochastic: random samples
+        # Stochastic mode: independent uniform random samples per ray.
+        # Used during training to introduce randomness and avoid aliasing.
         u = torch.rand([*list(cdf.shape[:-1]), n_samples], device=cdf.device)
 
     # Pytest, overwrite u with numpy's fixed random numbers
@@ -461,31 +506,45 @@ def sample_pdf(bins, weights, n_samples, det=False, pytest=False):
         np.random.seed(0)
         new_shape = [*list(cdf.shape[:-1]), n_samples]
         if det:
-            u = np.linspace(0.0, 1.0, n_samples)
-            u = np.broadcast_to(u, new_shape)
+            u_np: npt.NDArray[np.floating[Any]] = np.linspace(0.0, 1.0, n_samples)
+            u_np = np.broadcast_to(u_np, new_shape)
         else:
-            u = np.random.rand(*new_shape)
-        u = torch.tensor(u, device=cdf.device)
+            u_np = np.random.rand(*new_shape)
+        u = torch.tensor(u_np, device=cdf.device)
 
-    # Invert CDF using binary search
-    # For each uniform sample u, find where it falls in the CDF
+    # --- Stage 4: Invert the CDF via binary search (inverse transform sampling) ---
+    # For each uniform sample u, find the index in the CDF where u would be inserted
+    # to keep it sorted. This gives us the bin that the quantile u falls into.
+    # right=True means we use the right boundary when u equals a CDF value exactly.
     u = u.contiguous()
     inds = torch.searchsorted(cdf, u, right=True)
+    # Clamp the indices so they stay within valid bounds: [0, len(cdf)-1].
+    # 'below' is the index of the left edge of the bracket containing u.
+    # 'above' is the index of the right edge of the bracket containing u.
     below = torch.max(torch.zeros_like(inds - 1), inds - 1)
     above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
+    # Stack into pairs (below, above) so we can gather both edges at once.
     inds_g = torch.stack([below, above], -1)  # (batch, N_samples, 2)
 
-    # Gather the CDF and bin values at the indices
+    # --- Stage 5: Gather the CDF and bin values at the bracket edges ---
+    # We need the CDF values and bin depths at both the left and right edges of
+    # the bracket so we can interpolate between them.
     # cdf_g = tf.gather(cdf, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
     # bins_g = tf.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+    # The expand+gather pattern is the PyTorch equivalent of TensorFlow's batched gather.
     matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
     cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
     bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
 
-    # Linear interpolation between the two surrounding bin values
+    # --- Stage 6: Linear interpolation to find the exact sample depth ---
+    # We know u lies somewhere between cdf_g[...,0] and cdf_g[...,1].
+    # We find the fractional position t of u within that CDF interval,
+    # then apply the same fraction to the corresponding bin depth interval.
+    # Guard against degenerate brackets (zero-width CDF interval) by replacing
+    # the denominator with 1, which makes t=0 and returns the left bin edge.
     denom = cdf_g[..., 1] - cdf_g[..., 0]
     denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
-    t = (u - cdf_g[..., 0]) / denom
-    samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+    t = (u - cdf_g[..., 0]) / denom  # fractional position within the bracket [0, 1]
+    samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])  # interpolated depth
 
     return samples

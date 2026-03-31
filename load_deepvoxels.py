@@ -1,12 +1,24 @@
 import os
+from typing import Any, List, Optional, Tuple
 
 import imageio
 import numpy as np
+import numpy.typing as npt
 
 
-def load_dv_data(scene="cube", basedir="/data/deepvoxels", testskip=8):
+def load_dv_data(
+    scene: str = "cube", basedir: str = "/data/deepvoxels", testskip: int = 8
+) -> Tuple[
+    npt.NDArray[np.floating[Any]],
+    npt.NDArray[np.floating[Any]],
+    npt.NDArray[np.floating[Any]],
+    List[float],
+    List[npt.NDArray[np.integer[Any]]],
+]:
 
-    def parse_intrinsics(filepath, trgt_sidelength, invert_y=False):
+    def parse_intrinsics(
+        filepath: str, trgt_sidelength: int, invert_y: bool = False
+    ) -> Tuple[npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]], float, float, bool]:
         # Get camera intrinsics
         with open(filepath) as file:
             f, cx, cy = list(map(float, file.readline().split()))[:3]
@@ -16,14 +28,14 @@ def load_dv_data(scene="cube", basedir="/data/deepvoxels", testskip=8):
             height, width = map(float, file.readline().split())
 
             try:
-                world2cam_poses = int(file.readline())
+                world2cam_poses_int: Optional[int] = int(file.readline())
             except ValueError:
-                world2cam_poses = None
+                world2cam_poses_int = None
 
-        if world2cam_poses is None:
+        if world2cam_poses_int is None:
             world2cam_poses = False
-
-        world2cam_poses = bool(world2cam_poses)
+        else:
+            world2cam_poses = bool(world2cam_poses_int)
 
         print(cx, cy, f, height, width)
 
@@ -39,7 +51,7 @@ def load_dv_data(scene="cube", basedir="/data/deepvoxels", testskip=8):
 
         return full_intrinsic, grid_barycenter, scale, near_plane, world2cam_poses
 
-    def load_pose(filename):
+    def load_pose(filename: str) -> npt.NDArray[np.floating[Any]]:
         if not os.path.isfile(filename):
             msg = f"Pose file not found: {filename}"
             raise FileNotFoundError(msg)
@@ -58,7 +70,7 @@ def load_dv_data(scene="cube", basedir="/data/deepvoxels", testskip=8):
     focal = full_intrinsic[0, 0]
     print(H, W, focal)
 
-    def dir2poses(posedir):
+    def dir2poses(posedir: str) -> npt.NDArray[np.floating[Any]]:
         poses = np.stack(
             [load_pose(os.path.join(posedir, f)) for f in sorted(os.listdir(posedir)) if f.endswith("txt")], 0
         )
@@ -97,8 +109,8 @@ def load_dv_data(scene="cube", basedir="/data/deepvoxels", testskip=8):
     )
 
     all_imgs = [imgs, valimgs, testimgs]
-    counts = [0] + [x.shape[0] for x in all_imgs]
-    counts = np.cumsum(counts)
+    counts_list = [0] + [x.shape[0] for x in all_imgs]
+    counts: npt.NDArray[np.integer[Any]] = np.cumsum(counts_list)
     i_split = [np.arange(counts[i], counts[i + 1]) for i in range(3)]
 
     imgs = np.concatenate(all_imgs, 0)
